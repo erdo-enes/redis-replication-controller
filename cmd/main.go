@@ -16,11 +16,11 @@ import (
 	clientgo "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/endo-sys/redis-replication-controller/internal/config"
-	"github.com/endo-sys/redis-replication-controller/internal/controller"
-	kube "github.com/endo-sys/redis-replication-controller/internal/kubernetes"
-	"github.com/endo-sys/redis-replication-controller/internal/leader"
-	"github.com/endo-sys/redis-replication-controller/internal/redis"
+	"github.com/erdo-enes/redis-replication-controller/internal/config"
+	"github.com/erdo-enes/redis-replication-controller/internal/controller"
+	kube "github.com/erdo-enes/redis-replication-controller/internal/kubernetes"
+	"github.com/erdo-enes/redis-replication-controller/internal/leader"
+	"github.com/erdo-enes/redis-replication-controller/internal/redis"
 )
 
 func main() {

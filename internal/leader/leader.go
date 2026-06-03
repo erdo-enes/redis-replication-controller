@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
-	"github.com/endo-sys/redis-replication-controller/internal/config"
+	"github.com/erdo-enes/redis-replication-controller/internal/config"
 )
 
 // Run blocks running leader election until ctx is cancelled. onStarted is

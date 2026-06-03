@@ -1,4 +1,4 @@
-module github.com/endo-sys/redis-replication-controller
+module github.com/erdo-enes/redis-replication-controller
 
 go 1.22.0
 
