@@ -1,0 +1,417 @@
+# redis-replication-controller
+
+A Kubernetes-native controller that runs **plain Redis replication** (no Redis
+Sentinel, no Redis Cluster) and gives application clients a single, stable write
+endpoint:
+
+```
+Application
+  └─▶ normal Redis client
+        └─▶ redis-write Service (ClusterIP)
+              └─▶ the current Redis master Pod
+```
+
+The controller watches the Redis Pods, keeps exactly one of them as master, and
+moves a Kubernetes label so the `redis-write` Service always routes to that
+master. When the master fails, it promotes the best replica and re-points the
+Service.
+
+---
+
+## Table of contents
+
+- [Problem statement](#problem-statement)
+- [Why not Sentinel?](#why-not-sentinel)
+- [Architecture](#architecture)
+- [How routing works](#how-routing-works)
+- [Controller responsibilities](#controller-responsibilities)
+- [Reconciliation logic](#reconciliation-logic)
+- [Failover flow](#failover-flow)
+- [Split-brain protection](#split-brain-protection)
+- [Important limitations (read this)](#important-limitations-read-this)
+- [Environment variables](#environment-variables)
+- [Build](#build)
+- [Deploy](#deploy)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Production warnings](#production-warnings)
+- [Repository layout](#repository-layout)
+
+---
+
+## Problem statement
+
+Standard Redis high availability uses **Redis Sentinel**: clients connect to
+Sentinel, ask "who is the master?", and reconnect when the master changes. This
+requires a **Sentinel-aware client**.
+
+Many applications use a **plain Redis client** that only knows how to connect to
+a single host:port and does not speak the Sentinel protocol. For those clients
+we need a fixed address that always points at the current master, and something
+must keep that address correct as the master changes.
+
+This controller provides that "something" using only:
+
+- native Redis replication commands (`REPLICAOF`, `REPLICAOF NO ONE`, `ROLE`,
+  `INFO replication`), and
+- a Kubernetes `Service` whose label selector is updated to follow the master.
+
+## Why not Sentinel?
+
+| Concern | Sentinel | This controller |
+| --- | --- | --- |
+| Client requirement | Sentinel-aware client | **Any** plain Redis client |
+| Master discovery | Client asks Sentinel | Kubernetes Service selector |
+| Failover decision | Sentinel quorum | Controller reconcile loop + leader election |
+| Topology config | Sentinel | Native `REPLICAOF` |
+
+We are **not** using Sentinel because the application clients cannot use it.
+Instead, application clients connect to a normal `Service` DNS name:
+
+```
+redis-write.<namespace>.svc.cluster.local:6379
+```
+
+> ⚠️ This is a deliberate trade-off. Sentinel and Redis Cluster are the standard,
+> battle-tested options. See [Production warnings](#production-warnings).
+
+## Architecture
+
+```
+                         ┌─────────────────────────────┐
+   application  ───────▶ │ Service: redis-write         │
+   (plain client)        │ selector:                    │
+                         │   app=redis                  │
+                         │   redis-current-role=master  │
+                         └──────────────┬──────────────┘
+                                        │ (selector matches exactly one Pod)
+                                        ▼
+   ┌───────────────┐   REPLICAOF   ┌───────────────┐   REPLICAOF   ┌───────────────┐
+   │ redis-0       │◀──────────────│ redis-1       │               │ redis-2       │
+   │ role: master  │               │ role: replica │               │ role: replica │
+   │ label: master │               │ label: replica│               │ label: replica│
+   └───────▲───────┘               └───────────────┘               └───────────────┘
+           │  watch + PING + INFO replication + REPLICAOF + label patch
+           │
+   ┌───────┴────────────────────────────────────────────────────────────────────┐
+   │ redis-replication-controller (Deployment, 2 replicas, 1 active via Lease)    │
+   └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Redis Pods** run as a StatefulSet of ordinary `redis-server` processes
+  (`redis-0`, `redis-1`, …). No Sentinel sidecars.
+- **The controller** runs as a Deployment using in-cluster config and leader
+  election, so multiple replicas are safe but only one performs failover.
+
+## How routing works
+
+The `redis-write` Service uses this selector:
+
+```yaml
+selector:
+  app: redis
+  redis-current-role: master
+```
+
+Kubernetes only adds **ready** Pods matching that selector to the Service's
+EndpointSlice. The controller guarantees that **at most one** Pod ever carries
+`redis-current-role=master`, so the Service resolves to exactly the current
+master. All other Pods carry `redis-current-role=replica` (or no role label
+yet).
+
+A separate `redis-read` Service selects `app=redis` (all Pods) if you want to
+send read-only traffic to replicas.
+
+## Controller responsibilities
+
+1. Discover Redis Pods via a label selector.
+2. Health-check each Pod with `PING` and read its role via `INFO replication`.
+3. Decide whether a single valid master exists.
+4. Maintain the single-master invariant:
+   - exactly one Pod labeled `redis-current-role=master`,
+   - all other healthy Pods labeled `redis-current-role=replica` and following
+     the master via `REPLICAOF <master-ip> <port>`.
+5. Bootstrap an initial master when none exists.
+6. Detect master failure, wait a configurable threshold, then promote the best
+   replica with `REPLICAOF NO ONE` and verify it via `ROLE`.
+7. Reconfigure a recovered old master as a replica.
+8. Update the Kubernetes label so `redis-write` follows the new master.
+9. Fail safe: never promote during a Kubernetes API outage, never label a Pod
+   master whose role it cannot verify, and refuse to act on an ambiguous
+   split-brain.
+
+## Reconciliation logic
+
+Each pass (`internal/controller/reconcile.go`) is **idempotent** and decides
+based on two facts per Pod: the **Kubernetes label** and the **observed Redis
+role**.
+
+```
+list Pods ──(API error)──▶ return error, DO NOT touch Redis      (fail safe)
+   │
+   ├─ probe each Pod: PING + INFO replication  (unverifiable ⇒ treated unhealthy)
+   │
+   ├─ authoritative master = the single labeled Pod that is also a healthy
+   │  Redis master
+   │
+   ├─ if authoritative exists       ──▶ converge to it
+   │     (also safely demotes any extra masters — see split-brain)
+   ├─ else if exactly 1 real master ──▶ adopt it (fix missing/stale label)
+   ├─ else if 0 real masters        ──▶ bootstrap (fresh) OR failover (known master)
+   └─ else (≥2 masters, none authoritative)
+         ├─ no prior master recorded ──▶ bootstrap one (fresh standalone Pods)
+         └─ otherwise                ──▶ split-brain: log critical, DO NOTHING
+```
+
+**Convergence** to a chosen master `M`:
+
+1. Remove the master label from every other Pod (so the Service never has two
+   master endpoints at once).
+2. Ensure `M` is labeled `redis-current-role=master`.
+3. For every other healthy Pod: label it `replica` and, **only if it is not
+   already following `M`**, send `REPLICAOF <M-ip> <port>`.
+
+Because steps only act when state is wrong, repeated reconciles are no-ops once
+the topology is correct (`"no topology change required"`).
+
+## Failover flow
+
+```
+master Pod stops answering PING / INFO
+        │
+        ▼
+controller observes 0 healthy masters but a master was previously known
+        │
+        ├─ start/continue a failure timer
+        ├─ elapsed < MASTER_FAILURE_THRESHOLD_SECONDS  ──▶ wait (no promotion)
+        ▼
+elapsed ≥ threshold
+        │
+        ├─ pick best replica:
+        │     healthy ▸ role=replica ▸ highest INFO replication offset ▸ lowest ordinal
+        ├─ REPLICAOF NO ONE on the chosen replica
+        ├─ verify with ROLE that it now reports master   ──(fail)──▶ abort, no label change
+        ├─ label new master / strip old master label
+        └─ REPLICAOF the remaining healthy Pods to the new master
+                │
+                ▼
+        redis-write now routes new connections to the new master
+```
+
+When the **old master returns**, it usually comes back still believing it is a
+master. The controller sees two masters, treats the labeled one as
+authoritative, and demotes the returning Pod with `REPLICAOF <new-master>` plus
+a `replica` label.
+
+## Split-brain protection
+
+More than one Pod reporting `role=master` is treated as a split-brain risk:
+
+- The controller **logs a critical error** (`"multiple masters detected"`).
+- It resolves the situation **only** when exactly one of those masters is the
+  Kubernetes-authoritative master (carries the `redis-current-role=master`
+  label). It then demotes the others.
+- If authority is ambiguous (zero or several labeled masters), it makes **no
+  destructive change** and waits for an operator. The single exception is a
+  brand-new cluster with no recorded master anywhere, which is safely
+  bootstrapped.
+
+## Important limitations (read this)
+
+1. **Existing TCP connections are not migrated.** After a failover, clients
+   holding a connection to the old master will see connection resets, write
+   errors, or `READONLY` errors. **Clients must reconnect** (use a client with
+   reconnect + retry). The `redis-write` Service only changes where *new*
+   connections land.
+2. **Redis replication is asynchronous.** A write acknowledged by the old master
+   may not have reached the promoted replica. Such writes can be **lost** during
+   failover. Do not use this for data that cannot tolerate small windows of loss.
+3. **This controller replaces responsibilities normally handled by Sentinel.**
+   It is therefore conservative about split-brain, stale state, and unsafe
+   promotion, and it will refuse to act rather than risk data corruption.
+4. **Accept the operational risk.** Custom failover logic is only appropriate if
+   your team owns and understands it.
+5. **Prefer the standard tools when you can.** For stronger, standard Redis HA,
+   use **Redis Sentinel** or **Redis Cluster**.
+
+## Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REDIS_NAMESPACE` | `default` | Namespace to search for Redis Pods. |
+| `REDIS_POD_LABEL_SELECTOR` | `app=redis` | Selector identifying Redis Pods. |
+| `REDIS_PORT` | `6379` | Redis port on each Pod. |
+| `REDIS_WRITE_SERVICE_NAME` | `redis-write` | Service validated to point at the master. |
+| `RECONCILE_INTERVAL_SECONDS` | `10` | Time between reconcile passes. |
+| `MASTER_FAILURE_THRESHOLD_SECONDS` | `15` | How long the master must be unhealthy before failover. |
+| `REDIS_CONNECT_TIMEOUT_SECONDS` | `2` | TCP connect timeout per Redis call. |
+| `REDIS_COMMAND_TIMEOUT_SECONDS` | `2` | Command read/write timeout. |
+| `CONTROLLER_ID` | hostname | Identity used for leader election. |
+| `ENABLE_LEADER_ELECTION` | `true` | Enable Lease-based leader election. |
+| `LEASE_NAME` | `redis-replication-controller` | Lease object name. |
+| `LEASE_NAMESPACE` | `=REDIS_NAMESPACE` | Namespace for the Lease. |
+| `INITIAL_MASTER_STRATEGY` | `lowest-pod-ordinal` | `first-healthy`, `lowest-pod-ordinal`, or `annotation-preferred`. |
+| `ENABLE_CONFIG_REWRITE` | `false` | Run `CONFIG REWRITE` after role changes (see below). |
+| `HEALTH_PROBE_ADDR` | `:8081` | Address for `/healthz` and `/readyz`. |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
+
+**`INITIAL_MASTER_STRATEGY` values**
+
+- `first-healthy` — first healthy Pod in discovery (ordinal) order.
+- `lowest-pod-ordinal` — Pod with the lowest StatefulSet ordinal (default).
+- `annotation-preferred` — a Pod annotated
+  `redis-controller/preferred-master: "true"`, falling back to lowest ordinal.
+
+**`CONFIG REWRITE`** is optional and disabled by default. When enabled, the
+controller persists the `replicaof` directive into each Pod's config file so the
+role survives a Redis restart. This requires Redis to have been started with a
+writable config file; it is best-effort and failures are logged, not fatal.
+Leaving it disabled is also fine — the controller will simply re-establish the
+correct topology after a restart.
+
+## Build
+
+Requires Go 1.22+ (the module is verified with the standard toolchain).
+
+```bash
+# Compile, vet and test
+go vet ./...
+go test ./...
+go build -o bin/controller ./cmd
+
+# Or via the Makefile (which can run Go inside a container if you have no local Go):
+make check          # tidy + vet + test + build
+make GO=go check    # use your local Go instead of the golang container
+```
+
+Build the container image (requires a running Docker daemon):
+
+```bash
+make docker-build               # builds redis-replication-controller:latest
+# or
+docker build -t redis-replication-controller:latest .
+```
+
+The image is a multi-stage build producing a static binary on top of
+`gcr.io/distroless/static:nonroot` (runs as UID 65532, read-only root FS).
+
+## Deploy
+
+```bash
+# 1. Make the image available to your cluster
+#    (push to a registry, or `kind load docker-image redis-replication-controller:latest`)
+
+# 2. Apply manifests
+kubectl apply -f manifests/namespace.yaml
+kubectl apply -f manifests/serviceaccount.yaml
+kubectl apply -f manifests/rbac.yaml
+kubectl apply -f manifests/redis-statefulset-example.yaml
+kubectl apply -f manifests/redis-write-service.yaml
+kubectl apply -f manifests/deployment.yaml
+
+# or simply:
+make deploy
+```
+
+Then verify:
+
+```bash
+kubectl -n redis get pods -L redis-current-role
+kubectl -n redis run rc --rm -it --image=redis:7-alpine --restart=Never -- \
+  redis-cli -h redis-write -p 6379 SET test-key initial
+kubectl -n redis run rc --rm -it --image=redis:7-alpine --restart=Never -- \
+  redis-cli -h redis-write -p 6379 GET test-key   # -> "initial"
+```
+
+## Testing
+
+### Unit tests
+
+```bash
+go test ./...
+go test -race ./...
+```
+
+Coverage highlights:
+
+- **`internal/redis`** — RESP encode/decode; `ROLE` and `INFO replication`
+  parsing (master, replica, unexpected, malformed); `PING` success/error/
+  timeout/connection-refused against a real in-process TCP server; verifies the
+  exact bytes sent for `REPLICAOF` / `REPLICAOF NO ONE`.
+- **`internal/kubernetes`** — Pod discovery + ordinal sorting, find-by-IP, label
+  set/remove, annotation patch, and API-failure handling (via the fake
+  clientset).
+- **`internal/controller`** — single healthy master (no action), bootstrap of
+  fresh standalone masters, label/role mismatch correction, below/above failure
+  threshold, best-replica selection by offset, no-healthy-replica, failed
+  promotion verification, old-master demotion, split-brain (resolvable and
+  ambiguous), and idempotency (no repeated patches or `REPLICAOF`).
+- **`internal/config`** — defaults, overrides, and validation errors.
+
+### Kubernetes integration test
+
+A scripted end-to-end test lives in [`tests/integration`](tests/integration).
+It deploys the example StatefulSet + controller, verifies bootstrap, writes
+through `redis-write`, kills the master, and confirms failover. It requires a
+**throwaway** cluster (kind/minikube) — never run it against production.
+
+```bash
+make integration-test           # uses NAMESPACE=redis by default
+```
+
+## Troubleshooting
+
+```bash
+# Who is currently the master?
+kubectl -n redis get pods -L redis-current-role
+
+# Does redis-write resolve to exactly one (the master) endpoint?
+kubectl -n redis get endpointslice -l kubernetes.io/service-name=redis-write -o wide
+
+# Controller logs (structured JSON)
+kubectl -n redis logs deploy/redis-replication-controller -f
+
+# Which replica leads? (leader election Lease)
+kubectl -n redis get lease redis-replication-controller -o yaml
+
+# Inspect a Pod's real role directly
+kubectl -n redis exec redis-0 -- redis-cli ROLE
+kubectl -n redis exec redis-0 -- redis-cli INFO replication
+```
+
+Common issues:
+
+- **`redis-write` has no endpoints** — no Pod is labeled master yet (check
+  controller logs for bootstrap), or the master Pod is not `Ready`.
+- **Controller can't reach Redis** — ensure `--protected-mode no` (or a shared
+  password) so a different Pod can connect; check `NetworkPolicy`.
+- **Two masters reported** — look for `"multiple masters detected"`; the
+  controller will not auto-resolve an ambiguous split-brain. Decide the true
+  master, label exactly one Pod `redis-current-role=master`, and it will
+  converge.
+
+## Production warnings
+
+- Existing connections are **not** migrated; clients **must** reconnect.
+- Asynchronous replication means **recent writes can be lost** on failover.
+- This is **custom** HA logic replacing Sentinel — accept the risk or prefer
+  **Redis Sentinel** / **Redis Cluster** for standard guarantees.
+- Enable persistence (AOF/RDB + PVCs) on the Redis StatefulSet for real data;
+  the example uses `emptyDir` for portability only.
+
+## Repository layout
+
+```
+.
+├── cmd/main.go                     # entrypoint: config, in-cluster client, leader election
+├── internal/
+│   ├── config/                     # env-var configuration + validation
+│   ├── redis/                      # minimal RESP client (PING/ROLE/INFO/REPLICAOF)
+│   ├── kubernetes/                 # Pod discovery, label/annotation patching, endpoints
+│   ├── controller/                 # reconcile loop, failover, selection, split-brain
+│   └── leader/                     # Lease-based leader election
+├── manifests/                      # namespace, SA, RBAC, Deployment, Services, StatefulSet
+├── tests/integration/              # end-to-end script for a throwaway cluster
+├── Dockerfile                      # multi-stage, distroless non-root runtime
+└── Makefile
+```

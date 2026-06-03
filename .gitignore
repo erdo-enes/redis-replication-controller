@@ -1,0 +1,13 @@
+# Build output
+/bin/
+/out/
+controller
+
+# Local throwaway Go toolchain (used for building without a system Go)
+/.localgo/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

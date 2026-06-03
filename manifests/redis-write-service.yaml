@@ -1,0 +1,20 @@
+# Stable write endpoint for application clients.
+# The selector matches ONLY the Pod the controller has labeled as the current
+# master, so a normal Redis client connecting here always reaches the master.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-write
+  namespace: redis
+  labels:
+    app.kubernetes.io/name: redis-write
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+    redis-current-role: master
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP

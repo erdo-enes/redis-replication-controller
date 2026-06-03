@@ -1,0 +1,7 @@
+.git
+.gitignore
+.localgo
+bin
+*.md
+tests/integration
+manifests

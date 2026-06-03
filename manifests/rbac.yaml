@@ -1,0 +1,41 @@
+# Minimum permissions, scoped to a single namespace (Role, not ClusterRole).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redis-replication-controller
+  namespace: redis
+  labels:
+    app.kubernetes.io/name: redis-replication-controller
+rules:
+  # Discover Redis Pods and patch their role labels/annotations.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Read the redis-write Service (informational / future use).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Validate that redis-write routes only to the current master.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Leader election via the coordination.k8s.io Lease API.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redis-replication-controller
+  namespace: redis
+  labels:
+    app.kubernetes.io/name: redis-replication-controller
+subjects:
+  - kind: ServiceAccount
+    name: redis-replication-controller
+    namespace: redis
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: redis-replication-controller
