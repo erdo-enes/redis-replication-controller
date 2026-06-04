@@ -1,7 +1,7 @@
 # Build output
 /bin/
 /out/
-controller
+/controller
 
 # Local throwaway Go toolchain (used for building without a system Go)
 /.localgo/
