@@ -100,15 +100,29 @@ func (c *Controller) reconcile(ctx context.Context) error {
 		master = &m
 
 	case len(masters) > 1:
-		// Split-brain: keep the already-labeled master (or highest-offset) and demote the rest.
 		c.masterMissingAt = time.Time{}
-		picked := pickLabeledOrBest(masters)
+		var picked podInfo
+		if m, ok := labeledMaster(masters); ok {
+			// A pod already carries the authoritative master label (e.g. from a
+			// completed failover). Always keep it and demote the rest — never
+			// fight a promotion the controller already made.
+			picked = m
+			c.log.Warn("multiple masters detected; converging on labeled master", "master", picked.pod.Name)
+		} else {
+			// No pod is labeled master: this is a fresh cluster where every pod
+			// booted as its own standalone master. Choose the initial master
+			// deterministically via INITIAL_MASTER_STRATEGY (default
+			// lowest-pod-ordinal => redis-0) so bootstrap is predictable.
+			picked = *c.selectCandidate(masters)
+			c.log.Info("bootstrapping initial master from standalone pods",
+				"master", picked.pod.Name, "strategy", c.cfg.InitialMasterStrategy)
+		}
 		master = &picked
 		for i := range masters {
 			if masters[i].pod.Name == master.pod.Name {
 				continue
 			}
-			c.log.Warn("split-brain: demoting extra master", "pod", masters[i].pod.Name, "master", master.pod.Name)
+			c.log.Warn("demoting extra master", "pod", masters[i].pod.Name, "master", master.pod.Name)
 			if err := c.replicateOf(ctx, masters[i].pod, master.pod.IP); err != nil {
 				c.log.Error("demote failed", "pod", masters[i].pod.Name, "error", err)
 			}
@@ -227,7 +241,9 @@ func (c *Controller) replicateOf(ctx context.Context, pod kube.Pod, masterIP str
 	return nil
 }
 
-// selectCandidate picks the best replica to promote based on the configured strategy.
+// selectCandidate picks the best pod from a set according to the configured
+// strategy. It is used both to choose the initial master at bootstrap and to
+// choose which replica to promote during failover.
 func (c *Controller) selectCandidate(replicas []podInfo) *podInfo {
 	if len(replicas) == 0 {
 		return nil
@@ -270,19 +286,13 @@ func (c *Controller) selectCandidate(replicas []podInfo) *podInfo {
 	return &best
 }
 
-// pickLabeledOrBest returns the already-labeled master from a split-brain set,
-// or the one with the highest replication offset if none is labeled.
-func pickLabeledOrBest(masters []podInfo) podInfo {
+// labeledMaster returns the first master that carries the authoritative
+// redis-current-role=master label, if any does.
+func labeledMaster(masters []podInfo) (podInfo, bool) {
 	for _, m := range masters {
 		if m.pod.HasMasterLabel() {
-			return m
+			return m, true
 		}
 	}
-	best := masters[0]
-	for i := range masters {
-		if masters[i].info.Offset() > best.info.Offset() {
-			best = masters[i]
-		}
-	}
-	return best
+	return podInfo{}, false
 }

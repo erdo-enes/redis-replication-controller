@@ -1,9 +1,16 @@
 # Example Redis topology managed by the controller.
 #
-# - "redis" is a headless Service used by the StatefulSet for stable network IDs.
-# - "redis-read" selects all Redis Pods (handy for read-only traffic).
-# - The StatefulSet runs 3 plain Redis servers; the controller decides which one
-#   is master and reconfigures replication. No Sentinel is involved.
+# IMPORTANT: the Pods do NOT decide their own replication role. Every Pod boots
+# as a plain `redis-server` (a standalone master). The controller then elects a
+# single master, issues REPLICAOF to the others, and moves the
+# `redis-current-role=master` label so the redis-write Service follows it.
+#
+# Do NOT add `--replicaof` or an "if HOSTNAME == redis-0" startup script here:
+# that hardcodes redis-0 as master forever and fights the controller's failover
+# (a restarted redis-0 would come back as a second master => split-brain).
+#
+# - "redis"      : headless Service for stable StatefulSet network IDs.
+# - "redis-read" : selects all Pods (handy for read-only / replica traffic).
 apiVersion: v1
 kind: Service
 metadata:
@@ -54,28 +61,69 @@ spec:
       labels:
         app: redis
         # NOTE: redis-current-role is intentionally NOT set here.
-        # The controller owns that label.
+        # The controller owns that label and routes redis-write with it.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
     spec:
       terminationGracePeriodSeconds: 10
+
+      # Spread the 3 Redis Pods across different nodes so one node failure cannot
+      # take out master + replicas at once.
+      # NOTE: "required" needs at least 3 schedulable nodes or Pods stay Pending.
+      # On a smaller cluster switch to preferredDuringSchedulingIgnoredDuringExecution.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values: ["redis"]
+              topologyKey: kubernetes.io/hostname
+
+      # redis_exporter as a native sidecar (Kubernetes >= 1.29; on 1.28 enable the
+      # SidecarContainers feature gate). It scrapes the local redis over
+      # localhost:6379 and exposes Prometheus metrics on :9121.
+      # If your cluster predates native sidecars, move this entry into the
+      # `containers:` list below instead.
+      initContainers:
+        - name: redis-exporter
+          image: oliver006/redis_exporter:latest
+          restartPolicy: Always # makes this a sidecar, not a run-once init container
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+          ports:
+            - name: metrics
+              containerPort: 9121
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
       containers:
         - name: redis
-          image: redis:7-alpine
-          # protected-mode must be off so the controller (a different Pod) can
-          # connect without auth. Persistence is disabled to keep the example
-          # cluster-agnostic; enable AOF/RDB + a PVC for real workloads.
+          image: redis:7.4.3-bookworm
+          # Plain redis-server, NO role decision here. protected-mode must be off
+          # so the controller (running in a different Pod) can connect without a
+          # password. AOF persistence is enabled because we use a real PVC below.
           command: ["redis-server"]
           args:
             - "--protected-mode"
             - "no"
             - "--appendonly"
-            - "no"
-            - "--save"
-            - ""
+            - "yes"
+            - "--dir"
+            - "/data"
           ports:
             - name: redis
               containerPort: 6379
           volumeMounts:
-            - name: data
+            - name: redis-data
               mountPath: /data
           readinessProbe:
             exec:
@@ -94,17 +142,12 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-      volumes:
-        - name: data
-          emptyDir: {}
-      # For real workloads replace the emptyDir volume above with a
-      # volumeClaimTemplates entry, e.g.:
-      #
-      # volumeClaimTemplates:
-      #   - metadata:
-      #       name: data
-      #     spec:
-      #       accessModes: ["ReadWriteOnce"]
-      #       resources:
-      #         requests:
-      #           storage: 1Gi
+
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
