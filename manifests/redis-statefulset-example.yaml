@@ -4,7 +4,7 @@
 # as a plain `redis-server` (a standalone master). The controller then elects a
 # single master, issues REPLICAOF to the others, and moves the
 # `redis-current-role=master` label so the redis-write Service follows it.
-#
+#kendi
 # Do NOT add `--replicaof` or an "if HOSTNAME == redis-0" startup script here:
 # that hardcodes redis-0 as master forever and fights the controller's failover
 # (a restarted redis-0 would come back as a second master => split-brain).
