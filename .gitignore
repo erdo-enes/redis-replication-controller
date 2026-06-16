@@ -2,6 +2,9 @@
 /bin/
 /out/
 /controller
+*.exe
+tools/failover-probe/failover-probe
+tools/failover-probe/probe
 
 # Local throwaway Go toolchain (used for building without a system Go)
 /.localgo/
