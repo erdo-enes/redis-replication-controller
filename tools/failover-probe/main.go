@@ -18,18 +18,16 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -233,7 +231,7 @@ func buildSampleKeys(prefix string, count int) []string {
 			keys = append(keys, k)
 		} else {
 			// For patterns ending with ":", append a random UUID segment
-			keys = append(keys, k+randomHex(8))
+			keys = append(keys, k+fmt.Sprintf("%08x", rng.Uint32()))
 		}
 	}
 	return keys
@@ -431,24 +429,7 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 
 // --- helpers ---
 
-var rnd = mustRand()
-
-type randReader struct{}
-
-func (r *randReader) Int(max int) int {
-	n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
-	return int(n.Int64())
-}
-
-func mustRand() *randReader { return &randReader{} }
-
-func randomHex(n int) string {
-	b := make([]byte, n/2+1)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x", b)[:n]
-}
-
-var tickCounter atomic.Int64
+var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 func short(id string) string {
 	if len(id) > 12 {
