@@ -1,35 +1,35 @@
-// Command failover-probe is a tiny Redis write client used to observe, from the
-// outside, exactly what an active connection experiences during a controller
-// failover.
+// Command failover-probe is a Redis client that behaves like a real
+// application: it maintains ONE long-lived connection to the redis-write-<set>
+// Service and, on each tick, performs both a READ (GET a key matching the
+// data-loader prefix) and a WRITE (INCR a counter). It reconnects only when the
+// connection breaks or the server replies READONLY.
 //
-// It behaves like a plain Redis application: it opens ONE long-lived connection
-// to a target (normally the redis-write-<set> Service that fronts the current
-// master) and issues INCR on a loop. It only reconnects when the connection
-// breaks OR the server answers READONLY — which is precisely the behaviour a
-// client must have for this controller's label-flip failover to be transparent.
+// It is designed to work alongside the data-loader Job: after that Job fills
+// Redis with realistic keys prefixed by DATA_PREFIX, this probe reads those
+// keys and writes fresh data, measuring exactly what an active connection
+// experiences during a controller failover.
 //
-// On every state change it logs what happened, so you can read off:
+// On every state change it logs:
 //   - whether the old connection was dropped (hard disconnect) or kept alive but
 //     turned read-only (READONLY) when the master was demoted,
-//   - the measured write-outage duration (≈ detection + failure threshold +
-//     promotion + endpoint propagation + readiness), and
+//   - the measured write-outage duration,
 //   - that the backend instance (run_id) actually changed after failover.
-//
-// It does NOT know or guess the controller's threshold. It just writes and
-// measures, so a 5s threshold visibly produces a shorter outage than a 15s one.
 package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -39,17 +39,19 @@ type config struct {
 	interval    time.Duration
 	dialTimeout time.Duration
 	cmdTimeout  time.Duration
-	key         string
+	probeKey    string
+	dataPrefix  string
 	logEvery    int64
 }
 
 func loadConfig() config {
 	return config{
-		addr:        env("TARGET_ADDR", "redis-write-cache.redis.svc.cluster.local:6379"),
+		addr:        env("TARGET_ADDR", "redis-write-cache.redis-test-enes.svc.cluster.local:6379"),
 		interval:    envDur("PROBE_INTERVAL", 250*time.Millisecond),
 		dialTimeout: envDur("DIAL_TIMEOUT", time.Second),
 		cmdTimeout:  envDur("CMD_TIMEOUT", time.Second),
-		key:         env("PROBE_KEY", "failover-probe:counter"),
+		probeKey:    env("PROBE_KEY", "failover-probe:counter"),
+		dataPrefix:  env("DATA_PREFIX", "ld"),
 		logEvery:    int64(envInt("LOG_EVERY", 20)),
 	}
 }
@@ -59,17 +61,20 @@ type stats struct {
 	readonly   int64
 	disconnect int64
 	dialErr    int64
+	readOK     int64
+	readMiss   int64
 }
 
 func (s stats) String() string {
-	return fmt.Sprintf("ok=%d readonly=%d disconnect=%d dial-err=%d", s.ok, s.readonly, s.disconnect, s.dialErr)
+	return fmt.Sprintf("ok=%d readonly=%d disconnect=%d dial-err=%d read-ok=%d read-miss=%d",
+		s.ok, s.readonly, s.disconnect, s.dialErr, s.readOK, s.readMiss)
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	cfg := loadConfig()
-	log.Printf("[START] target=%s interval=%s dial-timeout=%s cmd-timeout=%s key=%q",
-		cfg.addr, cfg.interval, cfg.dialTimeout, cfg.cmdTimeout, cfg.key)
+	log.Printf("[START] target=%s interval=%s dial-timeout=%s cmd-timeout=%s counter-key=%q data-prefix=%q",
+		cfg.addr, cfg.interval, cfg.dialTimeout, cfg.cmdTimeout, cfg.probeKey, cfg.dataPrefix)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -77,10 +82,15 @@ func main() {
 	var (
 		conn        net.Conn
 		reader      *bufio.Reader
-		backend     string    // run_id currently serving us
-		outageStart time.Time // zero when writes are healthy
+		backend     string
+		outageStart time.Time
 		st          stats
+		tick        int64
 	)
+
+	// Build a pool of sample keys to read. We generate keys matching the exact
+	// patterns the data-loader writes so GET hits existing data.
+	sampleKeys := buildSampleKeys(cfg.dataPrefix, 200)
 
 	closeConn := func() {
 		if conn != nil {
@@ -88,7 +98,6 @@ func main() {
 			conn, reader = nil, nil
 		}
 	}
-	// noteFailure records the start of an outage on the first failure after OK.
 	noteFailure := func() {
 		if outageStart.IsZero() {
 			outageStart = time.Now()
@@ -107,7 +116,9 @@ func main() {
 		case <-ticker.C:
 		}
 
-		// (Re)establish the connection if needed.
+		tick++
+
+		// --- (Re)establish connection if needed ---
 		if conn == nil {
 			c, r, err := dial(cfg.addr, cfg.dialTimeout)
 			if err != nil {
@@ -117,27 +128,63 @@ func main() {
 				continue
 			}
 			conn, reader = c, r
-			id, role := identify(conn, reader, cfg.cmdTimeout)
+
+			// On first connect (or after endpoint change), discover the data
+			// keys actually present via SCAN so reads hit real keys.
+			id, role, dbSize := identify(conn, reader, cfg.cmdTimeout)
 			switch {
 			case backend != "" && id != "" && id != backend:
 				log.Printf("[ENDPOINT-CHANGED] now run_id=%s role=%s (previously %s)", short(id), role, short(backend))
+			case backend == "":
+				log.Printf("[CONNECTED] run_id=%s role=%s dbsize=%d", short(id), role, dbSize)
 			default:
-				log.Printf("[CONNECTED] run_id=%s role=%s", short(id), role)
+				log.Printf("[RECONNECTED] run_id=%s role=%s dbsize=%d", short(id), role, dbSize)
 			}
 			if id != "" {
 				backend = id
 			}
+
+			// Scan for real keys matching our prefix to use as read targets.
+			discovered := scanKeys(conn, reader, cfg.cmdTimeout, cfg.dataPrefix, 100)
+			if len(discovered) > 0 {
+				sampleKeys = discovered
+				log.Printf("[SCAN] discovered %d keys matching prefix=%q", len(discovered), cfg.dataPrefix)
+			}
 		}
 
-		// Write probe.
-		start := time.Now()
-		n, err := incr(conn, reader, cfg.cmdTimeout, cfg.key)
-		rtt := time.Since(start)
+		// --- READ: GET a key from the data-loader set ---
+		readKey := sampleKeys[int(tick)%len(sampleKeys)]
+		readStart := time.Now()
+		val, err := get(conn, reader, cfg.cmdTimeout, readKey)
+		readRTT := time.Since(readStart)
+
 		if err != nil {
 			noteFailure()
 			if isReadOnly(err) {
 				st.readonly++
-				log.Printf("[READONLY] write rejected: server is now a read-only replica; dropping connection to re-resolve via the Service")
+				log.Printf("[READONLY] GET %s rejected: server is now a read-only replica; dropping connection", readKey)
+			} else {
+				st.disconnect++
+				log.Printf("[DISCONNECT] GET %s failed: %v; will reconnect", readKey, err)
+			}
+			closeConn()
+			continue
+		}
+		if val != "" {
+			st.readOK++
+		} else {
+			st.readMiss++
+		}
+
+		// --- WRITE: INCR counter ---
+		writeStart := time.Now()
+		n, err := incr(conn, reader, cfg.cmdTimeout, cfg.probeKey)
+		writeRTT := time.Since(writeStart)
+		if err != nil {
+			noteFailure()
+			if isReadOnly(err) {
+				st.readonly++
+				log.Printf("[READONLY] write rejected: server became read-only after read; dropping connection")
 			} else {
 				st.disconnect++
 				log.Printf("[DISCONNECT] write failed: %v; will reconnect", err)
@@ -146,7 +193,7 @@ func main() {
 			continue
 		}
 
-		// Success.
+		// --- Success ---
 		st.ok++
 		if !outageStart.IsZero() {
 			log.Printf("[RECOVERED] write outage = %s; writable again on run_id=%s (counter=%d)",
@@ -154,12 +201,76 @@ func main() {
 			outageStart = time.Time{}
 		}
 		if cfg.logEvery > 0 && st.ok%cfg.logEvery == 0 {
-			log.Printf("[OK] counter=%d rtt=%s run_id=%s | %s", n, rtt.Round(time.Millisecond), short(backend), st)
+			log.Printf("[OK] counter=%d read-rtt=%s write-rtt=%s key=%q val-len=%d run_id=%s | %s",
+				n, readRTT.Round(time.Microsecond), writeRTT.Round(time.Microsecond),
+				readKey, len(val), short(backend), st)
 		}
 	}
 }
 
-// --- minimal RESP client (stdlib only) --------------------------------------
+// buildSampleKeys generates a set of keys matching the exact patterns the
+// data-loader writes. Used as fallback read targets before SCAN discovers
+// real keys.
+func buildSampleKeys(prefix string, count int) []string {
+	patterns := []struct {
+		fmt   string
+		args  func(i int) []interface{}
+	}{
+		{fmt: "%s:session:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+		{fmt: "%s:user:usr_%d:profile", args: func(i int) []interface{} { return []interface{}{prefix, 100000 + i%900000} }},
+		{fmt: "%s:cache:product:prod_%d", args: func(i int) []interface{} { return []interface{}{prefix, 1000 + i%9000} }},
+		{fmt: "%s:cache:category:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+		{fmt: "%s:cache:api:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+		{fmt: "%s:ratelimit:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+		{fmt: "%s:feature:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+		{fmt: "%s:lb:sticky:", args: func(i int) []interface{} { return []interface{}{prefix} }},
+	}
+	keys := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		p := patterns[i%len(patterns)]
+		k := fmt.Sprintf(p.fmt, p.args(i)...)
+		if !strings.HasSuffix(k, ":") {
+			keys = append(keys, k)
+		} else {
+			// For patterns ending with ":", append a random UUID segment
+			keys = append(keys, k+randomHex(8))
+		}
+	}
+	return keys
+}
+
+// scanKeys uses SCAN to discover up to limit keys matching prefix.
+func scanKeys(conn net.Conn, r *bufio.Reader, timeout time.Duration, prefix string, limit int) []string {
+	var keys []string
+	cursor := "0"
+	for {
+		reply, err := do(conn, r, timeout, "SCAN", cursor, "MATCH", prefix+":*", "COUNT", "50")
+		if err != nil {
+			return keys
+		}
+		arr, ok := reply.([]interface{})
+		if !ok || len(arr) < 2 {
+			return keys
+		}
+		cursor, _ = arr[0].(string)
+		if keyArr, ok := arr[1].([]interface{}); ok {
+			for _, k := range keyArr {
+				if s, ok := k.(string); ok {
+					keys = append(keys, s)
+					if len(keys) >= limit {
+						return keys
+					}
+				}
+			}
+		}
+		if cursor == "0" {
+			break
+		}
+	}
+	return keys
+}
+
+// --- minimal RESP client (stdlib only) ---
 
 type redisError struct{ msg string }
 
@@ -183,6 +294,20 @@ func do(conn net.Conn, r *bufio.Reader, timeout time.Duration, args ...string) (
 	return readReply(r)
 }
 
+func get(conn net.Conn, r *bufio.Reader, timeout time.Duration, key string) (string, error) {
+	reply, err := do(conn, r, timeout, "GET", key)
+	if err != nil {
+		return "", err
+	}
+	if reply == nil {
+		return "", nil
+	}
+	if s, ok := reply.(string); ok {
+		return s, nil
+	}
+	return "", fmt.Errorf("unexpected GET reply %T", reply)
+}
+
 func incr(conn net.Conn, r *bufio.Reader, timeout time.Duration, key string) (int64, error) {
 	reply, err := do(conn, r, timeout, "INCR", key)
 	if err != nil {
@@ -194,15 +319,19 @@ func incr(conn net.Conn, r *bufio.Reader, timeout time.Duration, key string) (in
 	return 0, fmt.Errorf("unexpected INCR reply %T", reply)
 }
 
-// identify returns the server's run_id and replication role via INFO, so a
-// change of backend instance after failover is visible.
-func identify(conn net.Conn, r *bufio.Reader, timeout time.Duration) (runID, role string) {
+func identify(conn net.Conn, r *bufio.Reader, timeout time.Duration) (runID, role string, dbSize int64) {
 	reply, err := do(conn, r, timeout, "INFO")
 	if err != nil {
-		return "", ""
+		return "", "", 0
 	}
 	s, _ := reply.(string)
-	return infoField(s, "run_id:"), infoField(s, "role:")
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "db0:keys=") {
+			dbSize, _ = strconv.ParseInt(strings.SplitN(ln[len("db0:keys="):], ",", 2)[0], 10, 64)
+		}
+	}
+	return infoField(s, "run_id:"), infoField(s, "role:"), dbSize
 }
 
 func infoField(info, prefix string) string {
@@ -262,7 +391,7 @@ func readReply(r *bufio.Reader) (interface{}, error) {
 		if n < 0 {
 			return nil, nil
 		}
-		buf := make([]byte, n+2) // include trailing CRLF
+		buf := make([]byte, n+2)
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
@@ -300,7 +429,26 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 	return line[:n-1], nil
 }
 
-// --- env helpers -------------------------------------------------------------
+// --- helpers ---
+
+var rnd = mustRand()
+
+type randReader struct{}
+
+func (r *randReader) Int(max int) int {
+	n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	return int(n.Int64())
+}
+
+func mustRand() *randReader { return &randReader{} }
+
+func randomHex(n int) string {
+	b := make([]byte, n/2+1)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)[:n]
+}
+
+var tickCounter atomic.Int64
 
 func short(id string) string {
 	if len(id) > 12 {

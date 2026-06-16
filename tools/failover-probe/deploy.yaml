@@ -39,14 +39,21 @@ spec:
           env:
             - name: TARGET_ADDR
               value: "redis-write-cache.redis-test-enes.svc.cluster.local:6379"
-            # How often to attempt a write. Smaller = finer-grained outage timing.
+            # Key prefix the data-loader used. The probe reads keys under this
+            # prefix (GET) and writes a counter (INCR) each tick.
+            - name: DATA_PREFIX
+              value: "ld"
+            # INCR counter key used for the write half of each tick.
+            - name: PROBE_KEY
+              value: "failover-probe:counter"
+            # How often to attempt read+write. Smaller = finer-grained outage timing.
             - name: PROBE_INTERVAL
               value: "250ms"
             - name: DIAL_TIMEOUT
               value: "1s"
             - name: CMD_TIMEOUT
               value: "1s"
-            # Print one steady-state [OK] line every N successful writes.
+            # Print one steady-state [OK] line every N successful cycles.
             - name: LOG_EVERY
               value: "20"
           resources:
