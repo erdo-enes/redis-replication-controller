@@ -158,7 +158,7 @@ spec:
             - "4"
             # --- Memory ---
             - "--maxmemory"
-            - "8gb"
+            - "6gb"
             - "--maxmemory-policy"
             - "allkeys-lru"
             # --- Background ---
@@ -226,16 +226,17 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 2000m
+              memory: 4Gi
             limits:
-              cpu: 1000m
-              memory: 10Gi
+              cpu: 4000m
+              memory: 8Gi
 
   volumeClaimTemplates:
     - metadata:
         name: redis-data
       spec:
+        storageClassName: csi-rbd-sc
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
