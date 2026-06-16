@@ -285,20 +285,32 @@ func main() {
 
 	startTime := time.Now()
 	batch := make([]string, 0, cfg.batchSize*2) // key, value alternating
-	flush := func() {
+	flush := func() bool {
 		if len(batch) == 0 {
-			return
+			return true
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		if err := conn.SetWriteDeadline(deadline); err != nil {
+			log.Printf("[FLUSH] set write deadline failed: %v", err)
+			return false
 		}
 		for i := 0; i < len(batch); i += 2 {
 			if err := writeCmd(conn, "SET", batch[i], batch[i+1]); err != nil {
 				errCount.Add(1)
+				log.Printf("[FLUSH] write error at key %d/%d: %v", i/2, len(batch)/2, err)
+				return false
 			}
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			log.Printf("[FLUSH] set read deadline failed: %v", err)
+			return false
 		}
 		for i := 0; i < len(batch); i += 2 {
 			reply, err := readReply(reader)
 			if err != nil {
 				errCount.Add(1)
-				continue
+				log.Printf("[FLUSH] read error at reply %d/%d: %v", i/2, len(batch)/2, err)
+				return false
 			}
 			if s, ok := reply.(string); !ok || s != "OK" {
 				errCount.Add(1)
@@ -308,6 +320,7 @@ func main() {
 			keyCount.Add(1)
 		}
 		batch = batch[:0]
+		return true
 	}
 
 	// Periodically check the pipeline and flush.
@@ -328,13 +341,25 @@ loop:
 		batch = append(batch, key, val)
 		idx++
 
-		if len(batch) >= cfg.batchSize*2 {
-			flush()
-		}
-
-		if writtenBytes.Load() >= targetBytes {
-			flush()
-			break
+		if len(batch) >= cfg.batchSize*2 || writtenBytes.Load() >= targetBytes {
+			if !flush() {
+				// Connection broken — reconnect and retry the batch.
+				log.Printf("[RECONNECT] connection lost after %d keys, reconnecting...", keyCount.Load())
+				conn.Close()
+				var err error
+				conn, reader, err = dial(cfg.addr, cfg.dialTimeout)
+				if err != nil {
+					log.Printf("[RECONNECT] dial failed: %v — retrying in 2s", err)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+				id, _ := identify(conn, reader, cfg.cmdTimeout)
+				log.Printf("[RECONNECTED] run_id=%s", short(id))
+				continue
+			}
+			if writtenBytes.Load() >= targetBytes {
+				break
+			}
 		}
 
 		if keyCount.Load() >= nextLog {
@@ -346,8 +371,6 @@ loop:
 			nextLog = keyCount.Load() + int64(logEvery)
 		}
 	}
-
-	flush()
 
 	elapsed := time.Since(startTime)
 	mb := float64(writtenBytes.Load()) / (1024 * 1024)
