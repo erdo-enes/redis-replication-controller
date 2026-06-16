@@ -23,6 +23,16 @@ import (
 	"github.com/erdo-enes/redis-replication-controller/internal/redis"
 )
 
+// setKey identifies one replication set. A set lives entirely within a single
+// namespace, so two namespaces that happen to reuse the same set label remain
+// independent and the controller never replicates across namespaces.
+type setKey struct {
+	namespace string
+	name      string
+}
+
+func (k setKey) String() string { return k.namespace + "/" + k.name }
+
 // setState is the per-replication-set bookkeeping the reconcile loop carries
 // between ticks.
 type setState struct {
@@ -37,9 +47,9 @@ type Controller struct {
 	dialer redis.Dialer
 	log    *slog.Logger
 
-	// sets holds per-set state, keyed by set name. It is only touched from the
-	// single reconcile goroutine.
-	sets map[string]*setState
+	// sets holds per-set state, keyed by namespace+set name. It is only touched
+	// from the single reconcile goroutine.
+	sets map[setKey]*setState
 
 	// mu guards the readiness fields, which are read from the health server
 	// goroutine.
@@ -55,7 +65,7 @@ func New(cfg *config.Config, kube *kube.Client, dialer redis.Dialer, log *slog.L
 		kube:   kube,
 		dialer: dialer,
 		log:    log,
-		sets:   make(map[string]*setState),
+		sets:   make(map[setKey]*setState),
 	}
 }
 
@@ -104,18 +114,18 @@ type podInfo struct {
 // reconcile lists all managed Redis pods, splits them into independent
 // replication sets, and reconciles each set against its own state.
 func (c *Controller) reconcile(ctx context.Context) error {
-	pods, err := c.kube.ListRedisPods(ctx, c.cfg.RedisPodLabelSelector)
+	pods, err := c.kube.ListRedisPods(ctx, c.cfg.RedisNamespaces, c.cfg.RedisPodLabelSelector)
 	if err != nil {
 		return fmt.Errorf("list pods: %w", err)
 	}
 
 	groups := groupBySet(pods, c.cfg.RedisSetLabelKey, c.cfg.DefaultSetName)
-	for _, name := range sortedKeys(groups) {
-		st := c.stateFor(name)
-		if err := c.reconcileSet(ctx, name, groups[name], st); err != nil {
+	for _, key := range sortedKeys(groups) {
+		st := c.stateFor(key)
+		if err := c.reconcileSet(ctx, key, groups[key], st); err != nil {
 			// A single set's failure must not stop the others or flap the
 			// controller's readiness; log and continue.
-			c.log.Error("reconcile set error", "set", name, "error", err)
+			c.log.Error("reconcile set error", "namespace", key.namespace, "set", key.name, "error", err)
 		}
 	}
 	c.pruneVanishedSets(groups)
@@ -123,8 +133,8 @@ func (c *Controller) reconcile(ctx context.Context) error {
 }
 
 // reconcileSet runs the master-election/failover logic for one replication set.
-func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []kube.Pod, st *setState) error {
-	reached := c.probe(ctx, setName, pods)
+func (c *Controller) reconcileSet(ctx context.Context, key setKey, pods []kube.Pod, st *setState) error {
+	reached := c.probe(ctx, key, pods)
 
 	var masters, replicas []podInfo
 	for _, pi := range reached {
@@ -135,7 +145,8 @@ func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []ku
 		}
 	}
 
-	c.log.Info("reconcile", "set", setName, "total", len(pods), "reached", len(reached),
+	c.log.Info("reconcile", "namespace", key.namespace, "set", key.name,
+		"total", len(pods), "reached", len(reached),
 		"masters", len(masters), "replicas", len(replicas))
 
 	var master *podInfo
@@ -154,7 +165,8 @@ func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []ku
 			// completed failover). Always keep it and demote the rest — never
 			// fight a promotion the controller already made.
 			picked = m
-			c.log.Warn("multiple masters detected; converging on labeled master", "set", setName, "master", picked.pod.Name)
+			c.log.Warn("multiple masters detected; converging on labeled master",
+				"namespace", key.namespace, "set", key.name, "master", picked.pod.Name)
 		} else {
 			// No pod is labeled master: this is a fresh set where every pod
 			// booted as its own standalone master. Choose the initial master
@@ -162,16 +174,19 @@ func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []ku
 			// lowest-pod-ordinal => redis-0) so bootstrap is predictable.
 			picked = *c.selectBootstrapCandidate(masters)
 			c.log.Info("bootstrapping initial master from standalone pods",
-				"set", setName, "master", picked.pod.Name, "strategy", c.cfg.InitialMasterStrategy)
+				"namespace", key.namespace, "set", key.name, "master", picked.pod.Name,
+				"strategy", c.cfg.InitialMasterStrategy)
 		}
 		master = &picked
 		for i := range masters {
 			if masters[i].pod.Name == master.pod.Name {
 				continue
 			}
-			c.log.Warn("demoting extra master", "set", setName, "pod", masters[i].pod.Name, "master", master.pod.Name)
+			c.log.Warn("demoting extra master", "namespace", key.namespace, "set", key.name,
+				"pod", masters[i].pod.Name, "master", master.pod.Name)
 			if err := c.replicateOf(ctx, masters[i].pod, master.pod.IP); err != nil {
-				c.log.Error("demote failed", "set", setName, "pod", masters[i].pod.Name, "error", err)
+				c.log.Error("demote failed", "namespace", key.namespace, "set", key.name,
+					"pod", masters[i].pod.Name, "error", err)
 			}
 		}
 
@@ -183,13 +198,13 @@ func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []ku
 		elapsed := time.Since(st.masterMissingAt)
 		if elapsed < c.cfg.MasterFailureThreshold {
 			c.log.Warn("no master detected, waiting for failure threshold",
-				"set", setName, "elapsed", elapsed.Round(time.Second),
+				"namespace", key.namespace, "set", key.name, "elapsed", elapsed.Round(time.Second),
 				"threshold", c.cfg.MasterFailureThreshold)
 			return nil
 		}
 		c.log.Warn("master absent beyond threshold, initiating failover",
-			"set", setName, "elapsed", elapsed.Round(time.Second))
-		promoted, err := c.failover(ctx, setName, pods, replicas, st)
+			"namespace", key.namespace, "set", key.name, "elapsed", elapsed.Round(time.Second))
+		promoted, err := c.failover(ctx, key, pods, replicas, st)
 		if err != nil {
 			return err
 		}
@@ -200,13 +215,13 @@ func (c *Controller) reconcileSet(ctx context.Context, setName string, pods []ku
 		master = promoted
 	}
 
-	return c.syncLabels(ctx, setName, pods, master.pod.Name)
+	return c.syncLabels(ctx, key, pods, master.pod.Name)
 }
 
 // probe connects to every Running pod in the set concurrently and returns the
 // ones that answered INFO replication. Bounded concurrency keeps one set's
 // unreachable pods from stalling the reconcile of other sets.
-func (c *Controller) probe(ctx context.Context, setName string, pods []kube.Pod) []podInfo {
+func (c *Controller) probe(ctx context.Context, key setKey, pods []kube.Pod) []podInfo {
 	type slot struct {
 		pi podInfo
 		ok bool
@@ -234,13 +249,13 @@ func (c *Controller) probe(ctx context.Context, setName string, pods []kube.Pod)
 			addr := fmt.Sprintf("%s:%d", pod.IP, c.cfg.RedisPort)
 			conn, err := c.dialer.Dial(ctx, addr)
 			if err != nil {
-				c.log.Warn("cannot connect to pod", "set", setName, "pod", pod.Name, "error", err)
+				c.log.Warn("cannot connect to pod", "namespace", key.namespace, "set", key.name, "pod", pod.Name, "error", err)
 				return
 			}
 			info, err := conn.InfoReplication(ctx)
 			conn.Close()
 			if err != nil {
-				c.log.Warn("cannot get replication info", "set", setName, "pod", pod.Name, "error", err)
+				c.log.Warn("cannot get replication info", "namespace", key.namespace, "set", key.name, "pod", pod.Name, "error", err)
 				return
 			}
 			results[idx] = slot{podInfo{pod, info}, true}
@@ -258,7 +273,7 @@ func (c *Controller) probe(ctx context.Context, setName string, pods []kube.Pod)
 }
 
 // syncLabels ensures every pod in the set has the correct role label.
-func (c *Controller) syncLabels(ctx context.Context, setName string, pods []kube.Pod, masterName string) error {
+func (c *Controller) syncLabels(ctx context.Context, key setKey, pods []kube.Pod, masterName string) error {
 	for _, pod := range pods {
 		want := kube.RoleReplica
 		if pod.Name == masterName {
@@ -267,19 +282,19 @@ func (c *Controller) syncLabels(ctx context.Context, setName string, pods []kube
 		if pod.RoleLabel() == want {
 			continue
 		}
-		c.log.Info("updating role label", "set", setName, "pod", pod.Name, "role", want)
-		if err := c.kube.SetRoleLabel(ctx, pod.Name, want); err != nil {
-			c.log.Error("failed to set role label", "set", setName, "pod", pod.Name, "error", err)
+		c.log.Info("updating role label", "namespace", key.namespace, "set", key.name, "pod", pod.Name, "role", want)
+		if err := c.kube.SetRoleLabel(ctx, pod.Namespace, pod.Name, want); err != nil {
+			c.log.Error("failed to set role label", "namespace", key.namespace, "set", key.name, "pod", pod.Name, "error", err)
 		}
 	}
 	return nil
 }
 
 // failover promotes the best available replica and redirects the others.
-func (c *Controller) failover(ctx context.Context, setName string, pods []kube.Pod, replicas []podInfo, st *setState) (*podInfo, error) {
+func (c *Controller) failover(ctx context.Context, key setKey, pods []kube.Pod, replicas []podInfo, st *setState) (*podInfo, error) {
 	candidate := selectFailoverCandidate(replicas)
 	if candidate == nil {
-		c.log.Error("no healthy replica available for promotion", "set", setName)
+		c.log.Error("no healthy replica available for promotion", "namespace", key.namespace, "set", key.name)
 		return nil, nil
 	}
 
@@ -291,8 +306,8 @@ func (c *Controller) failover(ctx context.Context, setName string, pods []kube.P
 		epoch = st.failoverEpoch + 1
 	}
 	st.failoverEpoch = epoch
-	c.log.Info("promoting replica to master", "set", setName, "pod", candidate.pod.Name,
-		"epoch", epoch, "offset", candidate.info.Offset())
+	c.log.Info("promoting replica to master", "namespace", key.namespace, "set", key.name,
+		"pod", candidate.pod.Name, "epoch", epoch, "offset", candidate.info.Offset())
 
 	addr := fmt.Sprintf("%s:%d", candidate.pod.IP, c.cfg.RedisPort)
 	conn, err := c.dialer.Dial(ctx, addr)
@@ -306,7 +321,8 @@ func (c *Controller) failover(ctx context.Context, setName string, pods []kube.P
 	}
 	if c.cfg.ConfigRewrite {
 		if err := conn.ConfigRewrite(ctx); err != nil {
-			c.log.Warn("CONFIG REWRITE failed on promoted pod", "set", setName, "pod", candidate.pod.Name, "error", err)
+			c.log.Warn("CONFIG REWRITE failed on promoted pod",
+				"namespace", key.namespace, "set", key.name, "pod", candidate.pod.Name, "error", err)
 		}
 	}
 
@@ -314,8 +330,9 @@ func (c *Controller) failover(ctx context.Context, setName string, pods []kube.P
 		config.AnnotationFailoverEpoch: strconv.Itoa(epoch),
 		config.AnnotationPromotedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := c.kube.SetAnnotations(ctx, candidate.pod.Name, annotations); err != nil {
-		c.log.Warn("failed to set failover annotations", "set", setName, "pod", candidate.pod.Name, "error", err)
+	if err := c.kube.SetAnnotations(ctx, candidate.pod.Namespace, candidate.pod.Name, annotations); err != nil {
+		c.log.Warn("failed to set failover annotations",
+			"namespace", key.namespace, "set", key.name, "pod", candidate.pod.Name, "error", err)
 	}
 
 	for _, r := range replicas {
@@ -324,7 +341,8 @@ func (c *Controller) failover(ctx context.Context, setName string, pods []kube.P
 		}
 		if err := c.replicateOf(ctx, r.pod, candidate.pod.IP); err != nil {
 			c.log.Warn("failed to redirect replica to new master",
-				"set", setName, "pod", r.pod.Name, "master", candidate.pod.Name, "error", err)
+				"namespace", key.namespace, "set", key.name, "pod", r.pod.Name,
+				"master", candidate.pod.Name, "error", err)
 		}
 	}
 
@@ -455,15 +473,17 @@ func labeledMaster(masters []podInfo) (podInfo, bool) {
 	return podInfo{}, false
 }
 
-// groupBySet splits pods into independent replication sets keyed by the value
-// of the set label; pods without the label fall into def. Each group keeps the
-// caller's incoming order (ListRedisPods sorts by ordinal), so per-set ordinal
-// selection stays deterministic.
-func groupBySet(pods []kube.Pod, key, def string) map[string][]kube.Pod {
-	groups := make(map[string][]kube.Pod)
+// groupBySet splits pods into independent replication sets keyed by namespace
+// plus the value of the set label; pods without the label fall into def. The
+// namespace is part of the key so identically named sets in different
+// namespaces never merge. Each group keeps the caller's incoming order
+// (ListRedisPods sorts by namespace then ordinal), so per-set ordinal selection
+// stays deterministic.
+func groupBySet(pods []kube.Pod, labelKey, def string) map[setKey][]kube.Pod {
+	groups := make(map[setKey][]kube.Pod)
 	for _, p := range pods {
-		name := p.SetName(key, def)
-		groups[name] = append(groups[name], p)
+		k := setKey{namespace: p.Namespace, name: p.SetName(labelKey, def)}
+		groups[k] = append(groups[k], p)
 	}
 	return groups
 }
@@ -485,32 +505,37 @@ func maxEpoch(pods []kube.Pod) int {
 }
 
 // stateFor returns the (lazily created) state for a set.
-func (c *Controller) stateFor(name string) *setState {
-	st := c.sets[name]
+func (c *Controller) stateFor(key setKey) *setState {
+	st := c.sets[key]
 	if st == nil {
 		st = &setState{}
-		c.sets[name] = st
+		c.sets[key] = st
 	}
 	return st
 }
 
 // pruneVanishedSets drops state for sets that no longer have any pods so the
 // map does not grow without bound as sets are added and removed.
-func (c *Controller) pruneVanishedSets(groups map[string][]kube.Pod) {
-	for name := range c.sets {
-		if _, ok := groups[name]; !ok {
-			delete(c.sets, name)
+func (c *Controller) pruneVanishedSets(groups map[setKey][]kube.Pod) {
+	for key := range c.sets {
+		if _, ok := groups[key]; !ok {
+			delete(c.sets, key)
 		}
 	}
 }
 
-// sortedKeys returns the group names in a stable order for deterministic logs
-// and reconciliation order.
-func sortedKeys(groups map[string][]kube.Pod) []string {
-	names := make([]string, 0, len(groups))
-	for name := range groups {
-		names = append(names, name)
+// sortedKeys returns the group keys in a stable order (namespace, then set
+// name) for deterministic logs and reconciliation order.
+func sortedKeys(groups map[setKey][]kube.Pod) []setKey {
+	keys := make([]setKey, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
-	sort.Strings(names)
-	return names
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].namespace != keys[j].namespace {
+			return keys[i].namespace < keys[j].namespace
+		}
+		return keys[i].name < keys[j].name
+	})
+	return keys
 }

@@ -10,7 +10,7 @@ var allEnvKeys = []string{
 	"RECONCILE_INTERVAL_SECONDS", "MASTER_FAILURE_THRESHOLD_SECONDS", "REDIS_CONNECT_TIMEOUT_SECONDS",
 	"REDIS_COMMAND_TIMEOUT_SECONDS", "CONTROLLER_ID", "ENABLE_LEADER_ELECTION", "LEASE_NAME",
 	"LEASE_NAMESPACE", "INITIAL_MASTER_STRATEGY", "ENABLE_CONFIG_REWRITE", "HEALTH_PROBE_ADDR",
-	"REDIS_SET_LABEL_KEY", "DEFAULT_SET_NAME", "PROBE_CONCURRENCY",
+	"REDIS_SET_LABEL_KEY", "DEFAULT_SET_NAME", "PROBE_CONCURRENCY", "REDIS_NAMESPACES",
 }
 
 func clearEnv(t *testing.T) {
@@ -61,6 +61,27 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.ProbeConcurrency != 16 {
 		t.Errorf("ProbeConcurrency = %d, want 16", c.ProbeConcurrency)
+	}
+	if len(c.RedisNamespaces) != 1 || c.RedisNamespaces[0] != c.RedisNamespace {
+		t.Errorf("RedisNamespaces = %v, want [%s]", c.RedisNamespaces, c.RedisNamespace)
+	}
+}
+
+func TestLoadNamespacesList(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("REDIS_NAMESPACES", " team-a, team-b ,team-a,, team-c ")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	want := []string{"team-a", "team-b", "team-c"} // trimmed, de-duped, ordered
+	if len(c.RedisNamespaces) != len(want) {
+		t.Fatalf("RedisNamespaces = %v, want %v", c.RedisNamespaces, want)
+	}
+	for i, ns := range want {
+		if c.RedisNamespaces[i] != ns {
+			t.Errorf("RedisNamespaces[%d] = %q, want %q", i, c.RedisNamespaces[i], ns)
+		}
 	}
 }
 

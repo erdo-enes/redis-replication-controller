@@ -32,8 +32,14 @@ const (
 
 // Config is the fully resolved controller configuration.
 type Config struct {
-	RedisNamespace         string
-	RedisPodLabelSelector  string
+	RedisNamespace string
+	// RedisNamespaces is the explicit set of namespaces searched for Redis Pods.
+	// It is parsed from the comma-separated REDIS_NAMESPACES and falls back to
+	// the single RedisNamespace when unset, so existing single-namespace
+	// deployments keep working. The controller needs an (RBAC) Role granting Pod
+	// get/list/watch/patch in every listed namespace.
+	RedisNamespaces       []string
+	RedisPodLabelSelector string
 	RedisPort              int
 	RedisWriteServiceName  string
 	ReconcileInterval      time.Duration
@@ -80,6 +86,7 @@ func Load() (*Config, error) {
 		DefaultSetName:        getEnv("DEFAULT_SET_NAME", "default"),
 	}
 	c.LeaseNamespace = getEnv("LEASE_NAMESPACE", c.RedisNamespace)
+	c.RedisNamespaces = parseNamespaces(getEnv("REDIS_NAMESPACES", ""), c.RedisNamespace)
 
 	var err error
 	if c.RedisPort, err = getEnvInt("REDIS_PORT", 6379); err != nil {
@@ -120,6 +127,9 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.RedisNamespace) == "" {
 		return fmt.Errorf("REDIS_NAMESPACE must not be empty")
 	}
+	if len(c.RedisNamespaces) == 0 {
+		return fmt.Errorf("REDIS_NAMESPACES must resolve to at least one namespace")
+	}
 	if strings.TrimSpace(c.RedisSetLabelKey) == "" {
 		return fmt.Errorf("REDIS_SET_LABEL_KEY must not be empty")
 	}
@@ -142,6 +152,26 @@ func (c *Config) validate() error {
 		return fmt.Errorf("REDIS_COMMAND_TIMEOUT_SECONDS must be > 0")
 	}
 	return nil
+}
+
+// parseNamespaces splits a comma-separated namespace list, trimming blanks and
+// de-duplicating while preserving order. An empty list yields []string{fallback}
+// so an unset REDIS_NAMESPACES keeps the single-namespace behaviour.
+func parseNamespaces(csv, fallback string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range strings.Split(csv, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return []string{fallback}
+	}
+	return out
 }
 
 func defaultControllerID() string {

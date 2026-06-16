@@ -34,6 +34,7 @@ func main() {
 	logger.Info("controller started",
 		"controllerID", cfg.ControllerID,
 		"namespace", cfg.RedisNamespace,
+		"namespaces", cfg.RedisNamespaces,
 		"selector", cfg.RedisPodLabelSelector,
 		"setLabelKey", cfg.RedisSetLabelKey,
 		"defaultSetName", cfg.DefaultSetName,
@@ -62,7 +63,7 @@ func main() {
 
 	ctrl := controller.New(
 		cfg,
-		kube.New(cs, cfg.RedisNamespace),
+		kube.New(cs),
 		redis.NewDialer(cfg.RedisConnectTimeout, cfg.RedisCommandTimeout),
 		logger,
 	)

@@ -1,4 +1,11 @@
 # Minimum permissions, scoped to a single namespace (Role, not ClusterRole).
+# This Role covers the controller's HOME namespace ("redis"): the Lease for
+# leader election plus the Redis Pods of any set living here (e.g. "cache").
+# For each ADDITIONAL namespace in REDIS_NAMESPACES, create a Pods-only Role +
+# RoleBinding to this same ServiceAccount in that namespace — see
+# redis-set-sessions-example.yaml for the "redis-sessions" example. Using
+# per-namespace Roles (instead of one ClusterRole) keeps the controller's reach
+# limited to exactly the namespaces you opt in.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

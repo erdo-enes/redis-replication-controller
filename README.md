@@ -240,7 +240,8 @@ More than one Pod reporting `role=master` is treated as a split-brain risk:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `REDIS_NAMESPACE` | `default` | Namespace to search for Redis Pods. |
+| `REDIS_NAMESPACE` | `default` | Fallback namespace (used for the Lease and when `REDIS_NAMESPACES` is unset). |
+| `REDIS_NAMESPACES` | `=REDIS_NAMESPACE` | Comma-separated list of namespaces to manage. Needs a Pods Role in each. |
 | `REDIS_POD_LABEL_SELECTOR` | `app=redis` | Broad selector matching every managed Redis Pod across all sets. |
 | `REDIS_SET_LABEL_KEY` | `redis-set` | Pod label whose value groups Pods into independent replication sets. |
 | `DEFAULT_SET_NAME` | `default` | Set name for Pods missing `REDIS_SET_LABEL_KEY` (keeps a single unlabeled topology working). |
@@ -303,6 +304,22 @@ single-topology deployment keeps working with no changes. See
 (set `cache`) and
 [`manifests/redis-set-sessions-example.yaml`](manifests/redis-set-sessions-example.yaml)
 (set `sessions`) for a two-set example driven by a single controller.
+
+### Sets in different namespaces
+
+Sets do not have to share a namespace. List every namespace to manage in
+`REDIS_NAMESPACES` (comma-separated); the controller searches each one and keeps
+them independent. A set's identity is **(namespace, `redis-set` value)**, so two
+namespaces that reuse the same set name never merge, and the controller never
+issues `REPLICAOF` across a namespace boundary.
+
+Access is **least-privilege, opt-in**: there is no `ClusterRole`. For each
+additional namespace you create a Pods-only `Role` + `RoleBinding` to the
+controller's ServiceAccount (which lives in the controller's own namespace). The
+Lease for leader election stays in the controller's namespace only. The
+`sessions` example above lives in its own `redis-sessions` namespace and ships
+exactly that `Role`/`RoleBinding`. Leaving `REDIS_NAMESPACES` unset preserves the
+original single-namespace behaviour.
 
 **Availability.** Each set keeps serving down to its last surviving Pod: a lone
 surviving master is kept, and a lone surviving replica is promoted after

@@ -110,12 +110,16 @@ func (c *fakeConn) Close() error                        { return nil }
 const testNS = "redis"
 
 func testPod(name, ip, set, role string, ann map[string]string) *corev1.Pod {
+	return testPodNS(testNS, name, ip, set, role, ann)
+}
+
+func testPodNS(ns, name, ip, set, role string, ann map[string]string) *corev1.Pod {
 	labels := map[string]string{"app": "redis", "redis-set": set}
 	if role != "" {
 		labels[kube.LabelRole] = role
 	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, Labels: labels, Annotations: ann},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels, Annotations: ann},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
 			PodIP:      ip,
@@ -124,8 +128,12 @@ func testPod(name, ip, set, role string, ann map[string]string) *corev1.Pod {
 	}
 }
 
-func testConfig() *config.Config {
+func testConfig(namespaces ...string) *config.Config {
+	if len(namespaces) == 0 {
+		namespaces = []string{testNS}
+	}
 	return &config.Config{
+		RedisNamespaces:        namespaces,
 		RedisPodLabelSelector:  "app=redis",
 		RedisPort:              6379,
 		ReconcileInterval:      10 * time.Second,
@@ -164,7 +172,7 @@ func TestReconcileMultiSetIsolation(t *testing.T) {
 		addr("10.0.1.2"): {role: redis.RoleReplica, offset: 60, linkStatus: "down"},
 	}}
 
-	c := New(testConfig(), kube.New(cs, testNS), d, discardLogger())
+	c := New(testConfig(), kube.New(cs), d, discardLogger())
 	if err := c.reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -194,6 +202,55 @@ func TestReconcileMultiSetIsolation(t *testing.T) {
 	assertAnnotation(t, cs, "sessions-1", config.AnnotationFailoverEpoch, "1")
 }
 
+// TestReconcileCrossNamespaceIsolation verifies that two sets sharing the same
+// set label in *different* namespaces stay independent: a healthy set in one
+// namespace is untouched while a master-less set in another fails over, and no
+// REPLICAOF ever crosses a namespace boundary.
+func TestReconcileCrossNamespaceIsolation(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		// team-a / cache: healthy, cache-0 is master.
+		testPodNS("team-a", "cache-0", "10.1.0.1", "cache", kube.RoleMaster, nil),
+		testPodNS("team-a", "cache-1", "10.1.0.2", "cache", "", nil),
+		// team-b / cache: same set name, different namespace, no master.
+		testPodNS("team-b", "cache-0", "10.2.0.1", "cache", "", nil),
+		testPodNS("team-b", "cache-1", "10.2.0.2", "cache", "", nil),
+	)
+	d := &fakeDialer{nodes: map[string]*fakeNode{
+		addr("10.1.0.1"): {role: redis.RoleMaster, offset: 100},
+		addr("10.1.0.2"): {role: redis.RoleReplica, offset: 90, linkStatus: "up", masterHost: "10.1.0.1"},
+		addr("10.2.0.1"): {role: redis.RoleReplica, offset: 40, linkStatus: "down"},
+		addr("10.2.0.2"): {role: redis.RoleReplica, offset: 70, linkStatus: "down"},
+	}}
+
+	c := New(testConfig("team-a", "team-b"), kube.New(cs), d, discardLogger())
+	if err := c.reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// team-b promotes its own higher-offset replica (cache-1, 70 > 40).
+	if !hasOp(d, op{addr: addr("10.2.0.2"), kind: opReplicaOfNoOne}) {
+		t.Errorf("expected team-b/cache-1 promoted; ops=%+v", d.ops)
+	}
+	// team-b/cache-0 must replicate from team-b/cache-1, never from a team-a IP.
+	if !hasOp(d, op{addr: addr("10.2.0.1"), kind: opReplicaOf, masterH: "10.2.0.2"}) {
+		t.Errorf("expected team-b/cache-0 to follow team-b/cache-1; ops=%+v", d.ops)
+	}
+	// No write command may touch the healthy team-a set.
+	for _, o := range d.ops {
+		if o.addr == addr("10.1.0.1") || o.addr == addr("10.1.0.2") {
+			t.Errorf("cross-namespace or spurious op on team-a pod: %+v", o)
+		}
+		if o.kind == opReplicaOf && (o.masterH == "10.1.0.1" || o.masterH == "10.1.0.2") {
+			t.Errorf("REPLICAOF crossed into team-a master: %+v", o)
+		}
+	}
+
+	// Labels are patched into the correct namespace.
+	assertRoleNS(t, cs, "team-a", "cache-0", kube.RoleMaster)
+	assertRoleNS(t, cs, "team-b", "cache-1", kube.RoleMaster)
+	assertRoleNS(t, cs, "team-b", "cache-0", kube.RoleReplica)
+}
+
 // TestFailoverEpochContinuity verifies the epoch is derived from existing pod
 // annotations, so a fresh controller process does not regress the sequence.
 func TestFailoverEpochContinuity(t *testing.T) {
@@ -206,7 +263,7 @@ func TestFailoverEpochContinuity(t *testing.T) {
 		addr("10.0.2.2"): {role: redis.RoleReplica, offset: 10, linkStatus: "down"},
 	}}
 
-	c := New(testConfig(), kube.New(cs, testNS), d, discardLogger())
+	c := New(testConfig(), kube.New(cs), d, discardLogger())
 	if err := c.reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -266,12 +323,17 @@ func hasOp(d *fakeDialer, want op) bool {
 
 func assertRole(t *testing.T, cs *fake.Clientset, pod, want string) {
 	t.Helper()
-	p, err := cs.CoreV1().Pods(testNS).Get(context.Background(), pod, metav1.GetOptions{})
+	assertRoleNS(t, cs, testNS, pod, want)
+}
+
+func assertRoleNS(t *testing.T, cs *fake.Clientset, ns, pod, want string) {
+	t.Helper()
+	p, err := cs.CoreV1().Pods(ns).Get(context.Background(), pod, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get %s: %v", pod, err)
+		t.Fatalf("get %s/%s: %v", ns, pod, err)
 	}
 	if got := p.Labels[kube.LabelRole]; got != want {
-		t.Errorf("%s role label = %q, want %q", pod, got, want)
+		t.Errorf("%s/%s role label = %q, want %q", ns, pod, got, want)
 	}
 }
 

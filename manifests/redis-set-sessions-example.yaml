@@ -1,19 +1,67 @@
 # Second, fully independent replication set ("sessions") managed by the SAME
-# controller as the "cache" set in redis-statefulset-example.yaml.
+# controller as the "cache" set in redis-statefulset-example.yaml — but placed
+# in a SEPARATE namespace (redis-sessions) to demonstrate cross-namespace
+# management.
 #
-# Nothing about the controller is duplicated: it discovers every Pod under the
-# broad selector (app=redis), groups them by the redis-set label, and keeps a
-# separate master + failure timer + failover epoch per set. A failover in
-# "cache" cannot delay or mask one in "sessions" and vice versa.
+# The controller (Deployment + ServiceAccount in namespace "redis") only reaches
+# this namespace because:
+#   1. REDIS_NAMESPACES on the Deployment lists "redis-sessions", and
+#   2. the Role + RoleBinding below grant its ServiceAccount Pod get/list/watch/
+#      patch *in this namespace only* (least privilege — no ClusterRole).
 #
-# To add this set you only create Redis Pods labeled redis-set: sessions and a
-# redis-write-sessions Service whose selector includes that label.
+# A set's identity is (namespace, redis-set label), so this "sessions" set and
+# the "cache" set never merge and the controller never replicates across
+# namespaces. Each set keeps its own master, failure timer and failover epoch.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-sessions
+  labels:
+    app.kubernetes.io/part-of: redis-replication-controller
+---
+# Grant the controller's ServiceAccount (in namespace "redis") the rights it
+# needs on Redis Pods in THIS namespace. No lease permissions here — leader
+# election stays in the controller's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redis-replication-controller
+  namespace: redis-sessions
+  labels:
+    app.kubernetes.io/name: redis-replication-controller
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redis-replication-controller
+  namespace: redis-sessions
+  labels:
+    app.kubernetes.io/name: redis-replication-controller
+subjects:
+  - kind: ServiceAccount
+    name: redis-replication-controller
+    namespace: redis # the controller's SA lives in the "redis" namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: redis-replication-controller
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: redis-sessions # headless Service for stable StatefulSet network IDs.
-  namespace: redis
+  namespace: redis-sessions
   labels:
     app: redis
     redis-set: sessions
@@ -32,7 +80,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis-write-sessions
-  namespace: redis
+  namespace: redis-sessions
   labels:
     app.kubernetes.io/name: redis-write-sessions
 spec:
@@ -51,7 +99,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis-sessions
-  namespace: redis
+  namespace: redis-sessions
   labels:
     app: redis
     redis-set: sessions

@@ -33,8 +33,16 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
+            # Fallback single namespace (used for the Lease and when
+            # REDIS_NAMESPACES is unset).
             - name: REDIS_NAMESPACE
               value: "redis"
+            # Explicit list of namespaces to manage. The controller needs a Role
+            # granting Pod get/list/watch/patch in EVERY namespace listed here
+            # (see rbac.yaml for "redis" and redis-set-sessions-example.yaml for
+            # "redis-sessions"). Leave unset to manage only REDIS_NAMESPACE.
+            - name: REDIS_NAMESPACES
+              value: "redis,redis-sessions"
             # Broad selector matching every managed Redis Pod across all sets.
             - name: REDIS_POD_LABEL_SELECTOR
               value: "app=redis"
