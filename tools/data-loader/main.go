@@ -294,12 +294,16 @@ func main() {
 				errCount.Add(1)
 			}
 		}
-		for i := 0; i < len(batch)/2; i++ {
-			if _, err := readReply(reader); err != nil {
-				errCount.Add(1)
-			}
-		}
 		for i := 0; i < len(batch); i += 2 {
+			reply, err := readReply(reader)
+			if err != nil {
+				errCount.Add(1)
+				continue
+			}
+			if s, ok := reply.(string); !ok || s != "OK" {
+				errCount.Add(1)
+				continue
+			}
 			writtenBytes.Add(int64(len(batch[i]) + len(batch[i+1]) + 40))
 			keyCount.Add(1)
 		}
