@@ -39,35 +39,50 @@ type Pod struct {
 // RoleLabel returns the value of the controller's role label, or "".
 func (p Pod) RoleLabel() string { return p.Labels[LabelRole] }
 
+// SetName returns the value of the replication-set label identified by key,
+// falling back to def when the Pod does not carry that label. It is used to
+// group Pods into independent replication sets.
+func (p Pod) SetName(key, def string) string {
+	if v := p.Labels[key]; v != "" {
+		return v
+	}
+	return def
+}
+
 // HasMasterLabel reports whether the Pod is currently labeled as the master.
 func (p Pod) HasMasterLabel() bool { return p.Labels[LabelRole] == RoleMaster }
 
-// Client is a thin wrapper around a client-go clientset scoped to one namespace.
+// Client is a thin wrapper around a client-go clientset. It is not bound to a
+// single namespace: every operation takes the namespace it acts on, so one
+// Client can manage Redis Pods across several explicitly listed namespaces.
 type Client struct {
-	cs        clientgo.Interface
-	namespace string
+	cs clientgo.Interface
 }
 
-// New returns a Client backed by the given clientset and namespace.
-func New(cs clientgo.Interface, namespace string) *Client {
-	return &Client{cs: cs, namespace: namespace}
+// New returns a Client backed by the given clientset.
+func New(cs clientgo.Interface) *Client {
+	return &Client{cs: cs}
 }
 
-// Namespace returns the namespace this Client operates in.
-func (c *Client) Namespace() string { return c.namespace }
-
-// ListRedisPods lists Pods matching selector, sorted by ordinal (ascending,
-// unknown ordinals last) for deterministic selection.
-func (c *Client) ListRedisPods(ctx context.Context, selector string) ([]Pod, error) {
-	list, err := c.cs.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return nil, fmt.Errorf("list pods (selector=%q): %w", selector, err)
-	}
-	pods := make([]Pod, 0, len(list.Items))
-	for i := range list.Items {
-		pods = append(pods, toPod(&list.Items[i]))
+// ListRedisPods lists Pods matching selector across every namespace in
+// namespaces, sorted by namespace then ordinal (ascending, unknown ordinals
+// last) for deterministic selection. Each returned Pod carries its own
+// Namespace so callers can patch it back into the right place.
+func (c *Client) ListRedisPods(ctx context.Context, namespaces []string, selector string) ([]Pod, error) {
+	var pods []Pod
+	for _, ns := range namespaces {
+		list, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return nil, fmt.Errorf("list pods (ns=%q selector=%q): %w", ns, selector, err)
+		}
+		for i := range list.Items {
+			pods = append(pods, toPod(&list.Items[i]))
+		}
 	}
 	sort.Slice(pods, func(i, j int) bool {
+		if pods[i].Namespace != pods[j].Namespace {
+			return pods[i].Namespace < pods[j].Namespace
+		}
 		if pods[i].Ordinal != pods[j].Ordinal {
 			return ordinalLess(pods[i].Ordinal, pods[j].Ordinal)
 		}
@@ -77,27 +92,27 @@ func (c *Client) ListRedisPods(ctx context.Context, selector string) ([]Pod, err
 }
 
 // SetRoleLabel sets the controller's role label on a Pod to value.
-func (c *Client) SetRoleLabel(ctx context.Context, podName, value string) error {
+func (c *Client) SetRoleLabel(ctx context.Context, namespace, podName, value string) error {
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"labels": map[string]interface{}{LabelRole: value},
 		},
 	}
-	return c.patch(ctx, podName, patch)
+	return c.patch(ctx, namespace, podName, patch)
 }
 
 // RemoveRoleLabel deletes the controller's role label from a Pod.
-func (c *Client) RemoveRoleLabel(ctx context.Context, podName string) error {
+func (c *Client) RemoveRoleLabel(ctx context.Context, namespace, podName string) error {
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"labels": map[string]interface{}{LabelRole: nil},
 		},
 	}
-	return c.patch(ctx, podName, patch)
+	return c.patch(ctx, namespace, podName, patch)
 }
 
 // SetAnnotations merges the given annotations onto a Pod.
-func (c *Client) SetAnnotations(ctx context.Context, podName string, annotations map[string]string) error {
+func (c *Client) SetAnnotations(ctx context.Context, namespace, podName string, annotations map[string]string) error {
 	m := make(map[string]interface{}, len(annotations))
 	for k, v := range annotations {
 		m[k] = v
@@ -105,26 +120,26 @@ func (c *Client) SetAnnotations(ctx context.Context, podName string, annotations
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{"annotations": m},
 	}
-	return c.patch(ctx, podName, patch)
+	return c.patch(ctx, namespace, podName, patch)
 }
 
-func (c *Client) patch(ctx context.Context, podName string, patch map[string]interface{}) error {
+func (c *Client) patch(ctx context.Context, namespace, podName string, patch map[string]interface{}) error {
 	data, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
-	_, err = c.cs.CoreV1().Pods(c.namespace).Patch(ctx, podName, types.MergePatchType, data, metav1.PatchOptions{})
+	_, err = c.cs.CoreV1().Pods(namespace).Patch(ctx, podName, types.MergePatchType, data, metav1.PatchOptions{})
 	if err != nil {
-		return fmt.Errorf("patch pod %s: %w", podName, err)
+		return fmt.Errorf("patch pod %s/%s: %w", namespace, podName, err)
 	}
 	return nil
 }
 
 // EndpointSliceAddrs returns the ready endpoint addresses currently backing the
 // named Service, used to validate that redis-write points only at the master.
-func (c *Client) EndpointSliceAddrs(ctx context.Context, serviceName string) ([]string, error) {
+func (c *Client) EndpointSliceAddrs(ctx context.Context, namespace, serviceName string) ([]string, error) {
 	selector := "kubernetes.io/service-name=" + serviceName
-	list, err := c.cs.DiscoveryV1().EndpointSlices(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	list, err := c.cs.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("list endpointslices for %s: %w", serviceName, err)
 	}

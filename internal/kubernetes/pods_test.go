@@ -36,9 +36,9 @@ func TestListRedisPodsSortedAndParsed(t *testing.T) {
 		newPod("redis-2", "10.0.0.12", true, map[string]string{"app": "redis", LabelRole: RoleMaster}),
 		newPod("redis-0", "10.0.0.10", true, map[string]string{"app": "redis"}),
 	)
-	c := New(cs, testNS)
+	c := New(cs)
 
-	pods, err := c.ListRedisPods(context.Background(), "app=redis")
+	pods, err := c.ListRedisPods(context.Background(), []string{testNS}, "app=redis")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +94,10 @@ func TestFindByIP(t *testing.T) {
 
 func TestSetAndRemoveRoleLabel(t *testing.T) {
 	cs := fake.NewSimpleClientset(newPod("redis-0", "10.0.0.10", true, map[string]string{"app": "redis"}))
-	c := New(cs, testNS)
+	c := New(cs)
 	ctx := context.Background()
 
-	if err := c.SetRoleLabel(ctx, "redis-0", RoleMaster); err != nil {
+	if err := c.SetRoleLabel(ctx, testNS, "redis-0", RoleMaster); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := cs.CoreV1().Pods(testNS).Get(ctx, "redis-0", metav1.GetOptions{})
@@ -105,7 +105,7 @@ func TestSetAndRemoveRoleLabel(t *testing.T) {
 		t.Fatalf("label = %q, want master", p.Labels[LabelRole])
 	}
 
-	if err := c.RemoveRoleLabel(ctx, "redis-0"); err != nil {
+	if err := c.RemoveRoleLabel(ctx, testNS, "redis-0"); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = cs.CoreV1().Pods(testNS).Get(ctx, "redis-0", metav1.GetOptions{})
@@ -119,9 +119,9 @@ func TestSetAndRemoveRoleLabel(t *testing.T) {
 
 func TestSetAnnotations(t *testing.T) {
 	cs := fake.NewSimpleClientset(newPod("redis-0", "10.0.0.10", true, map[string]string{"app": "redis"}))
-	c := New(cs, testNS)
+	c := New(cs)
 	ctx := context.Background()
-	if err := c.SetAnnotations(ctx, "redis-0", map[string]string{"k": "v"}); err != nil {
+	if err := c.SetAnnotations(ctx, testNS, "redis-0", map[string]string{"k": "v"}); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := cs.CoreV1().Pods(testNS).Get(ctx, "redis-0", metav1.GetOptions{})
@@ -135,8 +135,8 @@ func TestListRedisPodsAPIFailure(t *testing.T) {
 	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("api server unavailable")
 	})
-	c := New(cs, testNS)
-	if _, err := c.ListRedisPods(context.Background(), "app=redis"); err == nil {
+	c := New(cs)
+	if _, err := c.ListRedisPods(context.Background(), []string{testNS}, "app=redis"); err == nil {
 		t.Fatal("expected error when API fails")
 	}
 }

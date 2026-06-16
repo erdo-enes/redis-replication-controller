@@ -1,0 +1,21 @@
+# External LoadBalancer write endpoint for the "cache" set's current master.
+# Like the ClusterIP redis-write-cache Service, the selector is scoped to one
+# replication set (redis-set: cache) so it never fans out across sets.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-write-cache-ext
+  namespace: redis-test-enes
+  labels:
+    app.kubernetes.io/name: redis-write-cache-ext
+spec:
+  type: LoadBalancer
+  selector:
+    app: redis
+    redis-set: cache
+    redis-current-role: master
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP

@@ -2,11 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis-replication-controller
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: redis-replication-controller
 spec:
-  # Two replicas for availability; leader election ensures only one acts.
   replicas: 2
   selector:
     matchLabels:
@@ -17,6 +16,8 @@ spec:
         app.kubernetes.io/name: redis-replication-controller
     spec:
       serviceAccountName: redis-replication-controller
+      imagePullSecrets:
+        - name: regcred
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -32,44 +33,16 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: controller-config
           env:
-            - name: REDIS_NAMESPACE
-              value: "redis"
-            - name: REDIS_POD_LABEL_SELECTOR
-              value: "app=redis"
-            - name: REDIS_PORT
-              value: "6379"
-            - name: REDIS_WRITE_SERVICE_NAME
-              value: "redis-write"
-            - name: RECONCILE_INTERVAL_SECONDS
-              value: "10"
-            - name: MASTER_FAILURE_THRESHOLD_SECONDS
-              value: "15"
-            - name: REDIS_CONNECT_TIMEOUT_SECONDS
-              value: "2"
-            - name: REDIS_COMMAND_TIMEOUT_SECONDS
-              value: "2"
-            # Unique identity per replica for leader election.
+            # Unique identity per replica for leader election — must be a
+            # fieldRef because it references the Pod's own name (dynamic).
             - name: CONTROLLER_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ENABLE_LEADER_ELECTION
-              value: "true"
-            - name: LEASE_NAME
-              value: "redis-replication-controller"
-            - name: LEASE_NAMESPACE
-              value: "redis"
-            # first-healthy | lowest-pod-ordinal | annotation-preferred
-            - name: INITIAL_MASTER_STRATEGY
-              value: "lowest-pod-ordinal"
-            # Persist replication role via CONFIG REWRITE (see README caveats).
-            - name: ENABLE_CONFIG_REWRITE
-              value: "false"
-            - name: HEALTH_PROBE_ADDR
-              value: ":8081"
-            - name: LOG_LEVEL
-              value: "info"
           ports:
             - name: health
               containerPort: 8081

@@ -15,7 +15,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app: redis
 spec:
@@ -31,7 +31,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis-read
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app: redis
 spec:
@@ -47,7 +47,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app: redis
 spec:
@@ -60,6 +60,11 @@ spec:
     metadata:
       labels:
         app: redis
+        # redis-set groups these Pods into one replication set named "cache".
+        # The controller elects a master per set; redis-write-cache routes to it.
+        # A second StatefulSet with redis-set: sessions is reconciled fully
+        # independently by the same controller (see 06-redis-sessions.yaml).
+        redis-set: cache
         # NOTE: redis-current-role is intentionally NOT set here.
         # The controller owns that label and routes redis-write with it.
       annotations:
@@ -108,21 +113,19 @@ spec:
       containers:
         - name: redis
           image: redis:7.4.3-bookworm
-          # Plain redis-server, NO role decision here. protected-mode must be off
-          # so the controller (running in a different Pod) can connect without a
-          # password. AOF persistence is enabled because we use a real PVC below.
+          # NO role decision here — every Pod boots as a standalone master.
+          # The controller elects one master per set via REPLICAOF at runtime.
+          # Config lives in ConfigMap redis-config-cache so it can be updated
+          # without rolling the StatefulSet (just restart the Pods).
           command: ["redis-server"]
-          args:
-            - "--protected-mode"
-            - "no"
-            - "--appendonly"
-            - "yes"
-            - "--dir"
-            - "/data"
+          args: ["/etc/redis/redis.conf"]
           ports:
             - name: redis
               containerPort: 6379
           volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
             - name: redis-data
               mountPath: /data
           readinessProbe:
@@ -137,17 +140,23 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 2000m
+              memory: 4Gi
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 4000m
+              memory: 8Gi
+
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config-cache
 
   volumeClaimTemplates:
     - metadata:
         name: redis-data
       spec:
+        storageClassName: csi-rbd-sc
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 1Gi
+            storage: 20Gi

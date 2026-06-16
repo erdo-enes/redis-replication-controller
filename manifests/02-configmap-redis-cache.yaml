@@ -1,0 +1,58 @@
+# Redis configuration for the "cache" replication set (StatefulSet redis).
+# Mounted as /etc/redis/redis.conf — the container starts with:
+#   redis-server /etc/redis/redis.conf
+#
+# After the initial 10 GB data load, uncomment the "save" lines and restart
+# the StatefulSet to enable periodic RDB snapshots for fast reload.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config-cache
+  namespace: redis-test-enes
+  labels:
+    app.kubernetes.io/name: redis-config-cache
+data:
+  redis.conf: |
+    # --- Network ---
+    protected-mode no
+    port 6379
+
+    # --- Persistence ---
+    appendonly yes
+    dir /data
+    aof-use-rdb-preamble yes
+
+    # RDB snapshots disabled during bulk load — uncomment after data-loader
+    # finishes, then run BGSAVE manually:
+    #   kubectl exec -it redis-0 -n redis-test-enes -- redis-cli BGSAVE
+    # save 900 1
+    # save 300 10
+    # save 60 10000
+
+    # --- Fast reload ---
+    rdbcompression no
+    rdbchecksum no
+    aof-load-truncated yes
+    loading-process-events-interval-bytes 4194304
+
+    # --- I/O ---
+    io-threads 4
+
+    # --- Memory ---
+    maxmemory 6gb
+    maxmemory-policy allkeys-lru
+
+    # --- Background ---
+    hz 20
+    activerehashing yes
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+
+    # --- Replication transport (controller owns role assignment) ---
+    repl-diskless-sync yes
+    repl-diskless-sync-delay 5
+    repl-backlog-size 64mb
+    repl-backlog-ttl 3600
+    repl-timeout 60
+    client-output-buffer-limit replica 512mb 256mb 60

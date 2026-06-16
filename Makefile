@@ -28,22 +28,17 @@ check: tidy vet test build
 docker-build:
 	docker build -t $(IMAGE) .
 
+# Manifests are numbered (00-,01-,...) so a single directory apply runs them in
+# dependency order: namespaces -> ServiceAccount -> RBAC -> Redis sets ->
+# controller. This deploys both example sets (cache in "redis", sessions in
+# "redis-sessions") plus the external LoadBalancer.
 .PHONY: deploy
 deploy:
-	kubectl apply -f manifests/namespace.yaml
-	kubectl apply -f manifests/serviceaccount.yaml
-	kubectl apply -f manifests/rbac.yaml
-	kubectl apply -f manifests/redis-statefulset-example.yaml
-	kubectl apply -f manifests/redis-write-service.yaml
-	kubectl apply -f manifests/deployment.yaml
+	kubectl apply -f manifests/
 
 .PHONY: undeploy
 undeploy:
-	-kubectl delete -f manifests/deployment.yaml
-	-kubectl delete -f manifests/redis-write-service.yaml
-	-kubectl delete -f manifests/redis-statefulset-example.yaml
-	-kubectl delete -f manifests/rbac.yaml
-	-kubectl delete -f manifests/serviceaccount.yaml
+	-kubectl delete --ignore-not-found -f manifests/
 
 .PHONY: integration-test
 integration-test:

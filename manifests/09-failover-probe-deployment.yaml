@@ -1,0 +1,65 @@
+# Runs the failover-probe in-cluster against the "cache" set's write endpoint.
+# It needs no RBAC — it is just a Redis client. Point TARGET_ADDR at whichever
+# redis-write-<set> Service you want to exercise (including one in another
+# namespace, e.g. redis-write-sessions.redis-sessions.svc.cluster.local:6379).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failover-probe
+  namespace: redis-test-enes
+  labels:
+    app.kubernetes.io/name: failover-probe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: failover-probe
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: failover-probe
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: failover-probe
+          image: harbor-enes-k8s.local/test/failover-probe:v1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: TARGET_ADDR
+              value: "redis-write-cache.redis-test-enes.svc.cluster.local:6379"
+            # Key prefix the data-loader used. The probe reads keys under this
+            # prefix (GET) and writes a counter (INCR) each tick.
+            - name: DATA_PREFIX
+              value: "ld"
+            # INCR counter key used for the write half of each tick.
+            - name: PROBE_KEY
+              value: "failover-probe:counter"
+            # How often to attempt read+write. Smaller = finer-grained outage timing.
+            - name: PROBE_INTERVAL
+              value: "250ms"
+            - name: DIAL_TIMEOUT
+              value: "1s"
+            - name: CMD_TIMEOUT
+              value: "1s"
+            # Print one steady-state [OK] line every N successful cycles.
+            - name: LOG_EVERY
+              value: "20"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi

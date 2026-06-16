@@ -32,8 +32,14 @@ const (
 
 // Config is the fully resolved controller configuration.
 type Config struct {
-	RedisNamespace         string
-	RedisPodLabelSelector  string
+	RedisNamespace string
+	// RedisNamespaces is the explicit set of namespaces searched for Redis Pods.
+	// It is parsed from the comma-separated REDIS_NAMESPACES and falls back to
+	// the single RedisNamespace when unset, so existing single-namespace
+	// deployments keep working. The controller needs an (RBAC) Role granting Pod
+	// get/list/watch/patch in every listed namespace.
+	RedisNamespaces       []string
+	RedisPodLabelSelector string
 	RedisPort              int
 	RedisWriteServiceName  string
 	ReconcileInterval      time.Duration
@@ -45,6 +51,18 @@ type Config struct {
 	LeaseName              string
 	LeaseNamespace         string
 	InitialMasterStrategy  string
+	// RedisSetLabelKey is the Pod label whose value groups Pods into independent
+	// replication sets. One controller reconciles every set found under the
+	// broad RedisPodLabelSelector, keeping each set's master separate. Pods that
+	// do not carry this label are folded into DefaultSetName so a single
+	// unlabeled topology keeps working unchanged (REDIS_SET_LABEL_KEY).
+	RedisSetLabelKey string
+	// DefaultSetName is the set name assigned to Pods missing RedisSetLabelKey.
+	DefaultSetName string
+	// ProbeConcurrency bounds how many Redis Pods are probed in parallel per
+	// reconcile so one set's unreachable Pods cannot stall the others
+	// (PROBE_CONCURRENCY).
+	ProbeConcurrency int
 	// ConfigRewrite controls whether CONFIG REWRITE is issued after changing a
 	// node's replication role so the change survives a Redis restart. Optional;
 	// disabled by default (ENABLE_CONFIG_REWRITE).
@@ -64,11 +82,17 @@ func Load() (*Config, error) {
 		LeaseName:             getEnv("LEASE_NAME", "redis-replication-controller"),
 		InitialMasterStrategy: strings.ToLower(getEnv("INITIAL_MASTER_STRATEGY", StrategyLowestPodOrdinal)),
 		HealthProbeAddr:       getEnv("HEALTH_PROBE_ADDR", ":8081"),
+		RedisSetLabelKey:      getEnv("REDIS_SET_LABEL_KEY", "redis-set"),
+		DefaultSetName:        getEnv("DEFAULT_SET_NAME", "default"),
 	}
 	c.LeaseNamespace = getEnv("LEASE_NAMESPACE", c.RedisNamespace)
+	c.RedisNamespaces = parseNamespaces(getEnv("REDIS_NAMESPACES", ""), c.RedisNamespace)
 
 	var err error
 	if c.RedisPort, err = getEnvInt("REDIS_PORT", 6379); err != nil {
+		return nil, err
+	}
+	if c.ProbeConcurrency, err = getEnvInt("PROBE_CONCURRENCY", 16); err != nil {
 		return nil, err
 	}
 	if c.ReconcileInterval, err = getEnvSeconds("RECONCILE_INTERVAL_SECONDS", 10); err != nil {
@@ -103,6 +127,18 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.RedisNamespace) == "" {
 		return fmt.Errorf("REDIS_NAMESPACE must not be empty")
 	}
+	if len(c.RedisNamespaces) == 0 {
+		return fmt.Errorf("REDIS_NAMESPACES must resolve to at least one namespace")
+	}
+	if strings.TrimSpace(c.RedisSetLabelKey) == "" {
+		return fmt.Errorf("REDIS_SET_LABEL_KEY must not be empty")
+	}
+	if strings.TrimSpace(c.DefaultSetName) == "" {
+		return fmt.Errorf("DEFAULT_SET_NAME must not be empty")
+	}
+	if c.ProbeConcurrency < 1 {
+		return fmt.Errorf("PROBE_CONCURRENCY must be >= 1")
+	}
 	switch c.InitialMasterStrategy {
 	case StrategyFirstHealthy, StrategyLowestPodOrdinal, StrategyAnnotationPreferred:
 	default:
@@ -116,6 +152,26 @@ func (c *Config) validate() error {
 		return fmt.Errorf("REDIS_COMMAND_TIMEOUT_SECONDS must be > 0")
 	}
 	return nil
+}
+
+// parseNamespaces splits a comma-separated namespace list, trimming blanks and
+// de-duplicating while preserving order. An empty list yields []string{fallback}
+// so an unset REDIS_NAMESPACES keeps the single-namespace behaviour.
+func parseNamespaces(csv, fallback string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range strings.Split(csv, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return []string{fallback}
+	}
+	return out
 }
 
 func defaultControllerID() string {

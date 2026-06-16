@@ -1,0 +1,56 @@
+# One-shot Job that loads 10+ GB of realistic application data into Redis
+# before failover testing. Runs once, writes pipelined SET commands against
+# the cache set's write endpoint, then completes.
+#
+# Customise TARGET_ADDR to target a different replication set, e.g.
+#   redis-write-sessions.redis-sessions.svc.cluster.local:6379
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-data-loader
+  namespace: redis-test-enes
+  labels:
+    app.kubernetes.io/name: redis-data-loader
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-data-loader
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: regcred
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loader
+          image: harbor-enes-k8s.local/test/data-loader:v1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: TARGET_ADDR
+              value: "redis-write-cache.redis-test-enes.svc.cluster.local:6379"
+            - name: TARGET_GB
+              value: "10"
+            - name: BATCH_SIZE
+              value: "500"
+            - name: DIAL_TIMEOUT
+              value: "5s"
+            - name: CMD_TIMEOUT
+              value: "5s"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 64Mi
+            limits:
+              cpu: 2000m
+              memory: 128Mi
