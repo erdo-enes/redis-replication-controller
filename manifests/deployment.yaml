@@ -35,8 +35,20 @@ spec:
           env:
             - name: REDIS_NAMESPACE
               value: "redis"
+            # Broad selector matching every managed Redis Pod across all sets.
             - name: REDIS_POD_LABEL_SELECTOR
               value: "app=redis"
+            # Pods are grouped into independent replication sets by this label's
+            # value; each set gets its own master and its own redis-write-<set>
+            # Service. Pods without the label fold into DEFAULT_SET_NAME.
+            - name: REDIS_SET_LABEL_KEY
+              value: "redis-set"
+            - name: DEFAULT_SET_NAME
+              value: "default"
+            # Max Redis Pods probed in parallel per reconcile, so one set's
+            # unreachable Pods cannot stall failover in the others.
+            - name: PROBE_CONCURRENCY
+              value: "16"
             - name: REDIS_PORT
               value: "6379"
             - name: REDIS_WRITE_SERVICE_NAME

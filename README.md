@@ -142,9 +142,11 @@ send read-only traffic to replicas.
 
 ## Reconciliation logic
 
-Each pass (`internal/controller/reconcile.go`) is **idempotent** and decides
-based on two facts per Pod: the **Kubernetes label** and the **observed Redis
-role**.
+Each pass (`internal/controller/controller.go`) first groups the discovered Pods
+into independent replication sets (by `REDIS_SET_LABEL_KEY`) and then runs the
+logic below **per set**, against that set's own state. It is **idempotent** and
+decides based on two facts per Pod: the **Kubernetes label** and the **observed
+Redis role**.
 
 ```
 list Pods ──(API error)──▶ return error, DO NOT touch Redis      (fail safe)
@@ -239,7 +241,10 @@ More than one Pod reporting `role=master` is treated as a split-brain risk:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `REDIS_NAMESPACE` | `default` | Namespace to search for Redis Pods. |
-| `REDIS_POD_LABEL_SELECTOR` | `app=redis` | Selector identifying Redis Pods. |
+| `REDIS_POD_LABEL_SELECTOR` | `app=redis` | Broad selector matching every managed Redis Pod across all sets. |
+| `REDIS_SET_LABEL_KEY` | `redis-set` | Pod label whose value groups Pods into independent replication sets. |
+| `DEFAULT_SET_NAME` | `default` | Set name for Pods missing `REDIS_SET_LABEL_KEY` (keeps a single unlabeled topology working). |
+| `PROBE_CONCURRENCY` | `16` | Max Redis Pods probed in parallel per reconcile. |
 | `REDIS_PORT` | `6379` | Redis port on each Pod. |
 | `REDIS_WRITE_SERVICE_NAME` | `redis-write` | Service validated to point at the master. |
 | `RECONCILE_INTERVAL_SECONDS` | `10` | Time between reconcile passes. |
@@ -268,6 +273,45 @@ role survives a Redis restart. This requires Redis to have been started with a
 writable config file; it is best-effort and failures are logged, not fatal.
 Leaving it disabled is also fine — the controller will simply re-establish the
 correct topology after a restart.
+
+## Managing multiple replication sets
+
+One controller manages any number of independent replication sets. It discovers
+every Pod under `REDIS_POD_LABEL_SELECTOR`, then **groups them by the value of
+the `REDIS_SET_LABEL_KEY` label** and reconciles each group on its own:
+
+```
+app=redis , redis-set=cache    → master: cache-0     → redis-write-cache
+app=redis , redis-set=sessions → master: sessions-1  → redis-write-sessions
+```
+
+Each set keeps **its own** master-failure timer and failover epoch, so a healthy
+set can never delay or mask a failover in another set. Every `REPLICAOF` and
+label change is scoped to the set it belongs to — a replica in one set is never
+pointed at another set's master.
+
+To add a set:
+
+1. Run Redis Pods labelled `redis-set: <name>` (plus `app=redis`). They boot as
+   plain standalone masters — no `--replicaof`.
+2. Create a `redis-write-<name>` Service whose selector is
+   `{ app: redis, redis-set: <name>, redis-current-role: master }`.
+
+Pods without the set label fold into `DEFAULT_SET_NAME`, so an existing
+single-topology deployment keeps working with no changes. See
+[`manifests/redis-statefulset-example.yaml`](manifests/redis-statefulset-example.yaml)
+(set `cache`) and
+[`manifests/redis-set-sessions-example.yaml`](manifests/redis-set-sessions-example.yaml)
+(set `sessions`) for a two-set example driven by a single controller.
+
+**Availability.** Each set keeps serving down to its last surviving Pod: a lone
+surviving master is kept, and a lone surviving replica is promoted after
+`MASTER_FAILURE_THRESHOLD_SECONDS`. During that promotion window the set's
+`redis-write-<name>` Service has no endpoint, so writes briefly fail until the
+new master is labelled and `Ready`. Probing is parallelised
+(`PROBE_CONCURRENCY`) so one set's dead Pods do not stall failover elsewhere.
+Failover promotes the reached replica with the highest replication offset (and a
+healthy master link where known) to minimise lost writes.
 
 ## Build
 

@@ -60,6 +60,11 @@ spec:
     metadata:
       labels:
         app: redis
+        # redis-set groups these Pods into one replication set named "cache".
+        # The controller elects a master per set; redis-write-cache routes to it.
+        # A second StatefulSet with redis-set: sessions is reconciled fully
+        # independently by the same controller (see redis-set-sessions-example.yaml).
+        redis-set: cache
         # NOTE: redis-current-role is intentionally NOT set here.
         # The controller owns that label and routes redis-write with it.
       annotations:
@@ -119,6 +124,15 @@ spec:
             - "yes"
             - "--dir"
             - "/data"
+            # OPTIONAL consistency knob (off by default). Makes a master refuse
+            # writes once it loses all replicas, self-fencing a partitioned old
+            # master after failover and shrinking the split-brain data-loss
+            # window. Trade-off: a lone surviving Pod also refuses writes, so
+            # leave commented if "serve down to one Pod" outranks consistency.
+            # - "--min-replicas-to-write"
+            # - "1"
+            # - "--min-replicas-max-lag"
+            # - "10"
           ports:
             - name: redis
               containerPort: 6379

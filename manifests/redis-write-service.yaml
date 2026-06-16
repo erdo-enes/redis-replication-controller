@@ -1,17 +1,20 @@
-# Stable write endpoint for application clients.
-# The selector matches ONLY the Pod the controller has labeled as the current
-# master, so a normal Redis client connecting here always reaches the master.
+# Stable write endpoint for the "cache" replication set.
+# The selector matches ONLY the Pod the controller has labeled master WITHIN
+# this set (redis-set: cache), so a plain Redis client connecting here always
+# reaches the cache master. Every replication set needs its own such Service;
+# see redis-set-sessions-example.yaml for the matching "sessions" endpoint.
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis-write
+  name: redis-write-cache
   namespace: redis
   labels:
-    app.kubernetes.io/name: redis-write
+    app.kubernetes.io/name: redis-write-cache
 spec:
   type: ClusterIP
   selector:
     app: redis
+    redis-set: cache
     redis-current-role: master
   ports:
     - name: redis

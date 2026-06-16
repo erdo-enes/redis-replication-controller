@@ -10,6 +10,7 @@ var allEnvKeys = []string{
 	"RECONCILE_INTERVAL_SECONDS", "MASTER_FAILURE_THRESHOLD_SECONDS", "REDIS_CONNECT_TIMEOUT_SECONDS",
 	"REDIS_COMMAND_TIMEOUT_SECONDS", "CONTROLLER_ID", "ENABLE_LEADER_ELECTION", "LEASE_NAME",
 	"LEASE_NAMESPACE", "INITIAL_MASTER_STRATEGY", "ENABLE_CONFIG_REWRITE", "HEALTH_PROBE_ADDR",
+	"REDIS_SET_LABEL_KEY", "DEFAULT_SET_NAME", "PROBE_CONCURRENCY",
 }
 
 func clearEnv(t *testing.T) {
@@ -51,6 +52,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.LeaseNamespace != c.RedisNamespace {
 		t.Errorf("LeaseNamespace = %q, want = RedisNamespace %q", c.LeaseNamespace, c.RedisNamespace)
+	}
+	if c.RedisSetLabelKey != "redis-set" {
+		t.Errorf("RedisSetLabelKey = %q, want redis-set", c.RedisSetLabelKey)
+	}
+	if c.DefaultSetName != "default" {
+		t.Errorf("DefaultSetName = %q, want default", c.DefaultSetName)
+	}
+	if c.ProbeConcurrency != 16 {
+		t.Errorf("ProbeConcurrency = %d, want 16", c.ProbeConcurrency)
 	}
 }
 
@@ -96,6 +106,7 @@ func TestLoadValidationErrors(t *testing.T) {
 		"port range":   {"REDIS_PORT": "70000"},
 		"bad bool":     {"ENABLE_LEADER_ELECTION": "maybe"},
 		"bad seconds":  {"RECONCILE_INTERVAL_SECONDS": "-1"},
+		"bad probe":    {"PROBE_CONCURRENCY": "0"},
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {

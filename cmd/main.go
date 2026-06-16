@@ -35,6 +35,9 @@ func main() {
 		"controllerID", cfg.ControllerID,
 		"namespace", cfg.RedisNamespace,
 		"selector", cfg.RedisPodLabelSelector,
+		"setLabelKey", cfg.RedisSetLabelKey,
+		"defaultSetName", cfg.DefaultSetName,
+		"probeConcurrency", cfg.ProbeConcurrency,
 		"redisPort", cfg.RedisPort,
 		"writeService", cfg.RedisWriteServiceName,
 		"reconcileIntervalSeconds", cfg.ReconcileInterval.Seconds(),
@@ -64,7 +67,7 @@ func main() {
 		logger,
 	)
 
-	go serveHealth(ctx, cfg.HealthProbeAddr, logger)
+	go serveHealth(ctx, cfg.HealthProbeAddr, ctrl.Ready, logger)
 
 	run := func(c context.Context) {
 		if err := ctrl.Run(c); err != nil && !errors.Is(err, context.Canceled) {
@@ -90,18 +93,27 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
-// serveHealth exposes /healthz and /readyz for Kubernetes probes.
-func serveHealth(ctx context.Context, addr string, logger *slog.Logger) {
+// serveHealth exposes /healthz and /readyz for Kubernetes probes. /healthz is a
+// plain liveness signal (the process is up); /readyz reflects whether the
+// reconcile loop is actually making progress, via ready.
+func serveHealth(ctx context.Context, addr string, ready func() bool, logger *slog.Logger) {
 	if addr == "" {
 		return
 	}
 	mux := http.NewServeMux()
-	ok := func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
-	}
-	mux.HandleFunc("/healthz", ok)
-	mux.HandleFunc("/readyz", ok)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "reconcile stale\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+	})
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

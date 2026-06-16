@@ -1,0 +1,127 @@
+# Second, fully independent replication set ("sessions") managed by the SAME
+# controller as the "cache" set in redis-statefulset-example.yaml.
+#
+# Nothing about the controller is duplicated: it discovers every Pod under the
+# broad selector (app=redis), groups them by the redis-set label, and keeps a
+# separate master + failure timer + failover epoch per set. A failover in
+# "cache" cannot delay or mask one in "sessions" and vice versa.
+#
+# To add this set you only create Redis Pods labeled redis-set: sessions and a
+# redis-write-sessions Service whose selector includes that label.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sessions # headless Service for stable StatefulSet network IDs.
+  namespace: redis
+  labels:
+    app: redis
+    redis-set: sessions
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+    redis-set: sessions
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Stable write endpoint for the "sessions" set's current master.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-write-sessions
+  namespace: redis
+  labels:
+    app.kubernetes.io/name: redis-write-sessions
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+    redis-set: sessions
+    redis-current-role: master
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sessions
+  namespace: redis
+  labels:
+    app: redis
+    redis-set: sessions
+spec:
+  serviceName: redis-sessions
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+      redis-set: sessions
+  template:
+    metadata:
+      labels:
+        app: redis
+        # Groups these Pods into the "sessions" replication set.
+        redis-set: sessions
+        # redis-current-role is owned by the controller; do not set it here.
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: redis
+          image: redis:7.4.3-bookworm
+          # Plain redis-server, NO role decision here (no --replicaof). Every Pod
+          # boots as a standalone master; the controller elects one per set.
+          command: ["redis-server"]
+          args:
+            - "--protected-mode"
+            - "no"
+            - "--appendonly"
+            - "yes"
+            - "--dir"
+            - "/data"
+            # OPTIONAL consistency knob (off by default). Setting these makes a
+            # master refuse writes once it loses all replicas, which self-fences
+            # a partitioned old master after a failover and shrinks the
+            # split-brain data-loss window. The trade-off is availability: a lone
+            # surviving Pod would also refuse writes, so leave these commented if
+            # "keep serving down to one Pod" matters more than consistency.
+            # - "--min-replicas-to-write"
+            # - "1"
+            # - "--min-replicas-max-lag"
+            # - "10"
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

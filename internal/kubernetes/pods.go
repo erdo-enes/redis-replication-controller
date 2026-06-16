@@ -39,6 +39,16 @@ type Pod struct {
 // RoleLabel returns the value of the controller's role label, or "".
 func (p Pod) RoleLabel() string { return p.Labels[LabelRole] }
 
+// SetName returns the value of the replication-set label identified by key,
+// falling back to def when the Pod does not carry that label. It is used to
+// group Pods into independent replication sets.
+func (p Pod) SetName(key, def string) string {
+	if v := p.Labels[key]; v != "" {
+		return v
+	}
+	return def
+}
+
 // HasMasterLabel reports whether the Pod is currently labeled as the master.
 func (p Pod) HasMasterLabel() bool { return p.Labels[LabelRole] == RoleMaster }
 

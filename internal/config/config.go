@@ -45,6 +45,18 @@ type Config struct {
 	LeaseName              string
 	LeaseNamespace         string
 	InitialMasterStrategy  string
+	// RedisSetLabelKey is the Pod label whose value groups Pods into independent
+	// replication sets. One controller reconciles every set found under the
+	// broad RedisPodLabelSelector, keeping each set's master separate. Pods that
+	// do not carry this label are folded into DefaultSetName so a single
+	// unlabeled topology keeps working unchanged (REDIS_SET_LABEL_KEY).
+	RedisSetLabelKey string
+	// DefaultSetName is the set name assigned to Pods missing RedisSetLabelKey.
+	DefaultSetName string
+	// ProbeConcurrency bounds how many Redis Pods are probed in parallel per
+	// reconcile so one set's unreachable Pods cannot stall the others
+	// (PROBE_CONCURRENCY).
+	ProbeConcurrency int
 	// ConfigRewrite controls whether CONFIG REWRITE is issued after changing a
 	// node's replication role so the change survives a Redis restart. Optional;
 	// disabled by default (ENABLE_CONFIG_REWRITE).
@@ -64,11 +76,16 @@ func Load() (*Config, error) {
 		LeaseName:             getEnv("LEASE_NAME", "redis-replication-controller"),
 		InitialMasterStrategy: strings.ToLower(getEnv("INITIAL_MASTER_STRATEGY", StrategyLowestPodOrdinal)),
 		HealthProbeAddr:       getEnv("HEALTH_PROBE_ADDR", ":8081"),
+		RedisSetLabelKey:      getEnv("REDIS_SET_LABEL_KEY", "redis-set"),
+		DefaultSetName:        getEnv("DEFAULT_SET_NAME", "default"),
 	}
 	c.LeaseNamespace = getEnv("LEASE_NAMESPACE", c.RedisNamespace)
 
 	var err error
 	if c.RedisPort, err = getEnvInt("REDIS_PORT", 6379); err != nil {
+		return nil, err
+	}
+	if c.ProbeConcurrency, err = getEnvInt("PROBE_CONCURRENCY", 16); err != nil {
 		return nil, err
 	}
 	if c.ReconcileInterval, err = getEnvSeconds("RECONCILE_INTERVAL_SECONDS", 10); err != nil {
@@ -102,6 +119,15 @@ func (c *Config) validate() error {
 	}
 	if strings.TrimSpace(c.RedisNamespace) == "" {
 		return fmt.Errorf("REDIS_NAMESPACE must not be empty")
+	}
+	if strings.TrimSpace(c.RedisSetLabelKey) == "" {
+		return fmt.Errorf("REDIS_SET_LABEL_KEY must not be empty")
+	}
+	if strings.TrimSpace(c.DefaultSetName) == "" {
+		return fmt.Errorf("DEFAULT_SET_NAME must not be empty")
+	}
+	if c.ProbeConcurrency < 1 {
+		return fmt.Errorf("PROBE_CONCURRENCY must be >= 1")
 	}
 	switch c.InitialMasterStrategy {
 	case StrategyFirstHealthy, StrategyLowestPodOrdinal, StrategyAnnotationPreferred:
