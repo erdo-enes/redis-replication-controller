@@ -171,6 +171,22 @@ spec:
             - "yes"
             - "--lazyfree-lazy-server-del"
             - "yes"
+            # --- Replication transport ---
+            - "--repl-diskless-sync"
+            - "yes"
+            - "--repl-diskless-sync-delay"
+            - "5"
+            - "--repl-backlog-size"
+            - "32mb"
+            - "--repl-backlog-ttl"
+            - "3600"
+            - "--repl-timeout"
+            - "60"
+            - "--client-output-buffer-limit"
+            - "replica"
+            - "256mb"
+            - "128mb"
+            - "60"
             # OPTIONAL consistency knob (off by default). Setting these makes a
             # master refuse writes once it loses all replicas, which self-fences
             # a partitioned old master after a failover and shrinks the

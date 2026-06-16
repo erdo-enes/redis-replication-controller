@@ -172,6 +172,33 @@ spec:
             - "yes"
             - "--lazyfree-lazy-server-del"
             - "yes"
+            # --- Replication transport (safe: only affects HOW data moves, not
+            # WHO is master. The controller owns role assignment via REPLICAOF.) ---
+            # Diskless sync: master streams RDB directly to replica sockets
+            # instead of writing to disk first. Faster initial sync.
+            - "--repl-diskless-sync"
+            - "yes"
+            # Wait 5s for additional replicas to join before starting sync.
+            - "--repl-diskless-sync-delay"
+            - "5"
+            # 64 MB replication backlog — allows partial resync after brief
+            # disconnects instead of full RDB transfer. For 10 GB datasets,
+            # a full resync is expensive; the backlog avoids it for short blips.
+            - "--repl-backlog-size"
+            - "64mb"
+            # Keep backlog for 1 hour after last replica disconnects.
+            - "--repl-backlog-ttl"
+            - "3600"
+            # Replication timeout: disconnect replica after 60s of no response.
+            - "--repl-timeout"
+            - "60"
+            # 512 MB output buffer per replica (hard limit). Prevents a slow
+            # replica from being killed mid-sync with a large dataset.
+            - "--client-output-buffer-limit"
+            - "replica"
+            - "512mb"
+            - "256mb"
+            - "60"
             # OPTIONAL consistency knob (off by default). Makes a master refuse
             # writes once it loses all replicas, self-fencing a partitioned old
             # master after failover and shrinking the split-brain data-loss
