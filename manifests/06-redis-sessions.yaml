@@ -132,6 +132,46 @@ spec:
             - "yes"
             - "--dir"
             - "/data"
+            # --- Fast reload ---
+            - "--aof-use-rdb-preamble"
+            - "yes"
+            - "--save"
+            - "900"
+            - "1"
+            - "--save"
+            - "300"
+            - "10"
+            - "--save"
+            - "60"
+            - "10000"
+            - "--rdbcompression"
+            - "yes"
+            - "--rdbchecksum"
+            - "no"
+            # --- I/O ---
+            - "--io-threads"
+            - "4"
+            # --- Memory ---
+            - "--maxmemory"
+            - "4gb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+            # --- Background ---
+            - "--hz"
+            - "20"
+            - "--activerehashing"
+            - "yes"
+            - "--lazyfree-lazy-eviction"
+            - "yes"
+            - "--lazyfree-lazy-expire"
+            - "yes"
+            - "--lazyfree-lazy-server-del"
+            - "yes"
+            # --- Replication ---
+            - "--repl-diskless-sync"
+            - "yes"
+            - "--repl-diskless-sync-delay"
+            - "5"
             # OPTIONAL consistency knob (off by default). Setting these makes a
             # master refuse writes once it loses all replicas, which self-fences
             # a partitioned old master after a failover and shrinks the
@@ -160,11 +200,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: 50m
+              cpu: 100m
               memory: 64Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 5Gi
   volumeClaimTemplates:
     - metadata:
         name: redis-data
@@ -172,4 +212,4 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 1Gi
+            storage: 10Gi
