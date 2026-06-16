@@ -135,6 +135,14 @@ spec:
             # --- Fast reload ---
             - "--aof-use-rdb-preamble"
             - "yes"
+            - "--rdbcompression"
+            - "no"
+            - "--rdbchecksum"
+            - "no"
+            - "--aof-load-truncated"
+            - "yes"
+            - "--loading-process-events-interval-bytes"
+            - "4194304"
             - "--save"
             - "900"
             - "1"
@@ -144,10 +152,6 @@ spec:
             - "--save"
             - "60"
             - "10000"
-            - "--rdbcompression"
-            - "yes"
-            - "--rdbchecksum"
-            - "no"
             # --- I/O ---
             - "--io-threads"
             - "4"
@@ -167,11 +171,6 @@ spec:
             - "yes"
             - "--lazyfree-lazy-server-del"
             - "yes"
-            # --- Replication ---
-            - "--repl-diskless-sync"
-            - "yes"
-            - "--repl-diskless-sync-delay"
-            - "5"
             # OPTIONAL consistency knob (off by default). Setting these makes a
             # master refuse writes once it loses all replicas, which self-fences
             # a partitioned old master after a failover and shrinks the

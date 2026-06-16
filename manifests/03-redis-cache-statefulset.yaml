@@ -124,15 +124,26 @@ spec:
             - "yes"
             - "--dir"
             - "/data"
-            # --- Persistence & fast reload ---
-            # Hybrid AOF: rewrite produces RDB-format preamble so restarts load a
-            # compressed snapshot instead of replaying every command. With 10 GB
-            # of data this cuts restart time from minutes to seconds.
+            # --- Fast reload ---
+            # RDB-format preamble so restart loads a snapshot, not replays AOF.
             - "--aof-use-rdb-preamble"
             - "yes"
-            # Periodic RDB snapshots (default schedule). Combined with the AOF
-            # preamble this means the AOF rewrite already produces a fresh RDB
-            # snapshot in the preamble on every rewrite.
+            # No LZF compression — larger RDB file on disk, but no decompression
+            # overhead on load. On PVC-backed fast storage this is faster overall.
+            - "--rdbcompression"
+            - "no"
+            # Skip CRC64 checksum during RDB load (~10–20 % faster).
+            - "--rdbchecksum"
+            - "no"
+            # Skip validation on truncated AOF (safe on reliable PVC).
+            - "--aof-load-truncated"
+            - "yes"
+            # Process server events only every 4 MB loaded instead of 512 KB,
+            # giving more throughput to the load itself.
+            - "--loading-process-events-interval-bytes"
+            - "4194304"
+            # Periodic RDB snapshots (triggers AOF rewrite which produces the
+            # RDB preamble, keeping the AOF file small and fresh).
             - "--save"
             - "900"
             - "1"
@@ -142,45 +153,25 @@ spec:
             - "--save"
             - "60"
             - "10000"
-            # Compress RDB snapshots with LZF (default on, explicit for clarity).
-            - "--rdbcompression"
-            - "yes"
-            # Skip CRC64 checksum validation when loading RDB. Saves ~10-20 % load
-            # time on large datasets. Safe when running on reliable storage (PVC).
-            - "--rdbchecksum"
-            - "no"
-            # --- I/O & threading ---
-            # Multi-threaded I/O for faster RDB/AOF load and write. Threads
-            # handle socket read/write; commands still single-threaded.
+            # --- I/O ---
             - "--io-threads"
             - "4"
-            # --- Memory & eviction ---
-            # 8 GB max memory (headroom for replication buffers + OS cache).
+            # --- Memory ---
             - "--maxmemory"
             - "8gb"
-            # allkeys-lru evicts least-recently-used keys when full — safe for
-            # cache workloads. Use noeviction if data loss is unacceptable.
             - "--maxmemory-policy"
             - "allkeys-lru"
-            # --- Background operations ---
-            # Higher frequency for expiration, eviction, and rehashing.
+            # --- Background ---
             - "--hz"
             - "20"
-            # Keep hash tables efficient as the dataset grows.
             - "--activerehashing"
             - "yes"
-            # Non-blocking deletion for large keys/expirations.
             - "--lazyfree-lazy-eviction"
             - "yes"
             - "--lazyfree-lazy-expire"
             - "yes"
             - "--lazyfree-lazy-server-del"
             - "yes"
-            # --- Replication (controller-managed, but fast sync helps) ---
-            - "--repl-diskless-sync"
-            - "yes"
-            - "--repl-diskless-sync-delay"
-            - "5"
             # OPTIONAL consistency knob (off by default). Makes a master refuse
             # writes once it loses all replicas, self-fencing a partitioned old
             # master after failover and shrinking the split-brain data-loss
