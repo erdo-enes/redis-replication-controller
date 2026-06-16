@@ -21,7 +21,7 @@ docker push harbor-enes-k8s.local/test/failover-probe:v1
 
 ```bash
 kubectl apply -f deploy.yaml
-kubectl -n redis logs -f deploy/failover-probe
+kubectl -n redis-test-enes logs -f deploy/failover-probe
 ```
 
 Point `TARGET_ADDR` at any set, including one in another namespace, e.g.

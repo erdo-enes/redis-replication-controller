@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: failover-probe
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: failover-probe
 spec:
@@ -19,6 +19,8 @@ spec:
       labels:
         app.kubernetes.io/name: failover-probe
     spec:
+      imagePullSecrets:
+        - name: regcred
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -36,7 +38,7 @@ spec:
               drop: ["ALL"]
           env:
             - name: TARGET_ADDR
-              value: "redis-write-cache.redis.svc.cluster.local:6379"
+              value: "redis-write-cache.redis-test-enes.svc.cluster.local:6379"
             # How often to attempt a write. Smaller = finer-grained outage timing.
             - name: PROBE_INTERVAL
               value: "250ms"
