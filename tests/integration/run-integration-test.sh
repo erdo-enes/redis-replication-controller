@@ -70,12 +70,14 @@ trap cleanup EXIT
 
 # --- deploy -------------------------------------------------------------------
 info "Applying manifests into namespace '$NAMESPACE'"
-kubectl apply -f "$MANIFESTS/namespace.yaml"
-kubectl apply -f "$MANIFESTS/serviceaccount.yaml"
-kubectl apply -f "$MANIFESTS/rbac.yaml"
-kubectl apply -f "$MANIFESTS/redis-statefulset-example.yaml"
-kubectl apply -f "$MANIFESTS/redis-write-service.yaml"
-kubectl apply -f "$MANIFESTS/deployment.yaml"
+# Minimal single-namespace ("cache") deployment: skip the LoadBalancer (05) and
+# the second-namespace example (06) so this runs on a plain kind cluster.
+kubectl apply -f "$MANIFESTS/00-namespace.yaml"
+kubectl apply -f "$MANIFESTS/01-serviceaccount.yaml"
+kubectl apply -f "$MANIFESTS/02-rbac.yaml"
+kubectl apply -f "$MANIFESTS/03-redis-cache-statefulset.yaml"
+kubectl apply -f "$MANIFESTS/04-redis-cache-write-service.yaml"
+kubectl apply -f "$MANIFESTS/07-controller-deployment.yaml"
 
 info "Waiting for Redis StatefulSet to be ready"
 kc rollout status statefulset/redis --timeout=180s

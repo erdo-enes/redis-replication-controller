@@ -300,9 +300,9 @@ To add a set:
 
 Pods without the set label fold into `DEFAULT_SET_NAME`, so an existing
 single-topology deployment keeps working with no changes. See
-[`manifests/redis-statefulset-example.yaml`](manifests/redis-statefulset-example.yaml)
+[`manifests/03-redis-cache-statefulset.yaml`](manifests/03-redis-cache-statefulset.yaml)
 (set `cache`) and
-[`manifests/redis-set-sessions-example.yaml`](manifests/redis-set-sessions-example.yaml)
+[`manifests/06-redis-sessions.yaml`](manifests/06-redis-sessions.yaml)
 (set `sessions`) for a two-set example driven by a single controller.
 
 ### Sets in different namespaces
@@ -362,17 +362,19 @@ The image is a multi-stage build producing a static binary on top of
 # 1. Make the image available to your cluster
 #    (push to a registry, or `kind load docker-image redis-replication-controller:latest`)
 
-# 2. Apply manifests
-kubectl apply -f manifests/namespace.yaml
-kubectl apply -f manifests/serviceaccount.yaml
-kubectl apply -f manifests/rbac.yaml
-kubectl apply -f manifests/redis-statefulset-example.yaml
-kubectl apply -f manifests/redis-write-service.yaml
-kubectl apply -f manifests/deployment.yaml
+# 2. Apply manifests. They are numbered (00-,01-,...) so a single directory
+#    apply runs them in dependency order: namespaces -> ServiceAccount -> RBAC
+#    -> Redis sets -> controller. No conflicts, no manual ordering.
+kubectl apply -f manifests/
 
 # or simply:
 make deploy
 ```
+
+This applies both example sets — `cache` in namespace `redis` and `sessions` in
+namespace `redis-sessions` — plus the external LoadBalancer. To deploy only the
+basics, apply the lower-numbered files individually (e.g. `00-` through `04-`
+and `07-controller-deployment.yaml`).
 
 Then verify:
 

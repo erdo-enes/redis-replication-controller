@@ -63,7 +63,7 @@ spec:
         # redis-set groups these Pods into one replication set named "cache".
         # The controller elects a master per set; redis-write-cache routes to it.
         # A second StatefulSet with redis-set: sessions is reconciled fully
-        # independently by the same controller (see redis-set-sessions-example.yaml).
+        # independently by the same controller (see 06-redis-sessions.yaml).
         redis-set: cache
         # NOTE: redis-current-role is intentionally NOT set here.
         # The controller owns that label and routes redis-write with it.

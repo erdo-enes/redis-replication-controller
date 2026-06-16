@@ -2,7 +2,7 @@
 # The selector matches ONLY the Pod the controller has labeled master WITHIN
 # this set (redis-set: cache), so a plain Redis client connecting here always
 # reaches the cache master. Every replication set needs its own such Service;
-# see redis-set-sessions-example.yaml for the matching "sessions" endpoint.
+# see 06-redis-sessions.yaml for the matching "sessions" endpoint.
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,5 +1,5 @@
 # Second, fully independent replication set ("sessions") managed by the SAME
-# controller as the "cache" set in redis-statefulset-example.yaml — but placed
+# controller as the "cache" set in 03-redis-cache-statefulset.yaml — but placed
 # in a SEPARATE namespace (redis-sessions) to demonstrate cross-namespace
 # management.
 #

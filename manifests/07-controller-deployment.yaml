@@ -39,7 +39,7 @@ spec:
               value: "redis"
             # Explicit list of namespaces to manage. The controller needs a Role
             # granting Pod get/list/watch/patch in EVERY namespace listed here
-            # (see rbac.yaml for "redis" and redis-set-sessions-example.yaml for
+            # (see 02-rbac.yaml for "redis" and 06-redis-sessions.yaml for
             # "redis-sessions"). Leave unset to manage only REDIS_NAMESPACE.
             - name: REDIS_NAMESPACES
               value: "redis,redis-sessions"
