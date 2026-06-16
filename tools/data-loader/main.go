@@ -19,13 +19,12 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -36,7 +35,10 @@ import (
 	"time"
 )
 
-var rnd = mustRand()
+// rng generates the fake test data. It is deliberately math/rand, not
+// crypto/rand: crypto/rand issues a getrandom syscall per call, and a single
+// record needs hundreds of random values, which made bulk generation crawl.
+var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 type config struct {
 	addr        string
@@ -294,12 +296,18 @@ func main() {
 			log.Printf("[FLUSH] set write deadline failed: %v", err)
 			return false
 		}
+		bw := bufio.NewWriterSize(conn, 64*1024)
 		for i := 0; i < len(batch); i += 2 {
-			if err := writeCmd(conn, "SET", batch[i], batch[i+1]); err != nil {
+			if err := writeCmd(bw, "SET", batch[i], batch[i+1]); err != nil {
 				errCount.Add(1)
 				log.Printf("[FLUSH] write error at key %d/%d: %v", i/2, len(batch)/2, err)
 				return false
 			}
+		}
+		if err := bw.Flush(); err != nil {
+			errCount.Add(1)
+			log.Printf("[FLUSH] socket flush error: %v", err)
+			return false
 		}
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			log.Printf("[FLUSH] set read deadline failed: %v", err)
@@ -308,8 +316,17 @@ func main() {
 		for i := 0; i < len(batch); i += 2 {
 			reply, err := readReply(reader)
 			if err != nil {
+				var re *redisError
+				if errors.As(err, &re) {
+					// Server rejected this command (e.g. OOM, READONLY). That is a
+					// per-command error, not a broken connection: count it and keep
+					// draining the rest of the pipelined replies so the stream stays
+					// in sync. Reconnecting would just replay the same failing batch.
+					errCount.Add(1)
+					continue
+				}
 				errCount.Add(1)
-				log.Printf("[FLUSH] read error at reply %d/%d: %v", i/2, len(batch)/2, err)
+				log.Printf("[FLUSH] transport read error at reply %d/%d: %v", i/2, len(batch)/2, err)
 				return false
 			}
 			if s, ok := reply.(string); !ok || s != "OK" {
@@ -323,10 +340,10 @@ func main() {
 		return true
 	}
 
-	// Periodically check the pipeline and flush.
+	// Log progress on a time interval (not a key count) so a slow or stalled
+	// run is visible immediately instead of hiding between key milestones.
 	idx := 0
-	logEvery := 50000
-	nextLog := int64(logEvery)
+	lastLog := startTime
 
 loop:
 	for {
@@ -362,14 +379,20 @@ loop:
 			}
 		}
 
-		if keyCount.Load() >= nextLog {
+		if time.Since(lastLog) >= 2*time.Second {
 			mb := float64(writtenBytes.Load()) / (1024 * 1024)
 			elapsed := time.Since(startTime)
 			rate := float64(writtenBytes.Load()) / elapsed.Seconds() / (1024 * 1024)
 			log.Printf("[PROGRESS] keys=%d size=%.0f MB elapsed=%s rate=%.1f MB/s err=%d",
 				keyCount.Load(), mb, elapsed.Round(time.Second), rate, errCount.Load())
-			nextLog = keyCount.Load() + int64(logEvery)
+			lastLog = time.Now()
 		}
+	}
+
+	// Flush any trailing partial batch (also covers the SIGTERM path, which the
+	// [STOP] message above promises but the loop break alone would skip).
+	if !flush() {
+		log.Printf("[WARN] final flush did not complete; up to %d keys may be unwritten", len(batch)/2)
 	}
 
 	elapsed := time.Since(startTime)
@@ -675,20 +698,16 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 
 // ----- helpers -----------------------------------------------------------------
 
-func mustRand() *randReader { return &randReader{} }
-
-type randReader struct{}
-
-func (r *randReader) Int(max int) int {
-	n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
-	return int(n.Int64())
+func rndN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return rng.Intn(n)
 }
 
-func rndN(n int) int { return rnd.Int(n) }
-
 func uuid4() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	var b [16]byte
+	_, _ = rng.Read(b[:]) // (*rand.Rand).Read never errors
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
