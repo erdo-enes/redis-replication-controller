@@ -5,7 +5,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis-write-cache-ext
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: redis-write-cache-ext
 spec:

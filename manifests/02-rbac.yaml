@@ -1,5 +1,5 @@
 # Minimum permissions, scoped to a single namespace (Role, not ClusterRole).
-# This Role covers the controller's HOME namespace ("redis"): the Lease for
+# This Role covers the controller's HOME namespace ("redis-test-enes"): the Lease for
 # leader election plus the Redis Pods of any set living here (e.g. "cache").
 # For each ADDITIONAL namespace in REDIS_NAMESPACES, create a Pods-only Role +
 # RoleBinding to this same ServiceAccount in that namespace — see
@@ -10,7 +10,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: redis-replication-controller
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: redis-replication-controller
 rules:
@@ -35,13 +35,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: redis-replication-controller
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: redis-replication-controller
 subjects:
   - kind: ServiceAccount
     name: redis-replication-controller
-    namespace: redis
+    namespace: redis-test-enes
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

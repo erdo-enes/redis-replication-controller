@@ -2,11 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis-replication-controller
-  namespace: redis
+  namespace: redis-test-enes
   labels:
     app.kubernetes.io/name: redis-replication-controller
 spec:
-  # Two replicas for availability; leader election ensures only one acts.
   replicas: 2
   selector:
     matchLabels:
@@ -36,13 +35,13 @@ spec:
             # Fallback single namespace (used for the Lease and when
             # REDIS_NAMESPACES is unset).
             - name: REDIS_NAMESPACE
-              value: "redis"
+              value: "redis-test-enes"
             # Explicit list of namespaces to manage. The controller needs a Role
             # granting Pod get/list/watch/patch in EVERY namespace listed here
-            # (see 02-rbac.yaml for "redis" and 06-redis-sessions.yaml for
+            # (see 02-rbac.yaml for "redis-test-enes" and 06-redis-sessions.yaml for
             # "redis-sessions"). Leave unset to manage only REDIS_NAMESPACE.
             - name: REDIS_NAMESPACES
-              value: "redis,redis-sessions"
+              value: "redis-test-enes,redis-sessions"
             # Broad selector matching every managed Redis Pod across all sets.
             - name: REDIS_POD_LABEL_SELECTOR
               value: "app=redis"
@@ -79,7 +78,7 @@ spec:
             - name: LEASE_NAME
               value: "redis-replication-controller"
             - name: LEASE_NAMESPACE
-              value: "redis"
+              value: "redis-test-enes"
             # first-healthy | lowest-pod-ordinal | annotation-preferred
             - name: INITIAL_MASTER_STRATEGY
               value: "lowest-pod-ordinal"
