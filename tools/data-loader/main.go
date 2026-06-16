@@ -291,12 +291,12 @@ func main() {
 		}
 		for i := 0; i < len(batch); i += 2 {
 			if err := writeCmd(conn, "SET", batch[i], batch[i+1]); err != nil {
-				atomic.AddInt64(&errCount, 1)
+				errCount.Add(1)
 			}
 		}
 		for i := 0; i < len(batch)/2; i++ {
 			if _, err := readReply(reader); err != nil {
-				atomic.AddInt64(&errCount, 1)
+				errCount.Add(1)
 			}
 		}
 		for i := 0; i < len(batch); i += 2 {
