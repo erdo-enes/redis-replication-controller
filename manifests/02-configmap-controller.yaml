@@ -1,0 +1,30 @@
+# Environment variables for the redis-replication-controller Deployment.
+# Kept in a ConfigMap so values can be changed without rolling the Deployment
+# (a Pod restart picks up the new values via envFrom).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: controller-config
+  namespace: redis-test-enes
+  labels:
+    app.kubernetes.io/name: redis-replication-controller
+data:
+  REDIS_NAMESPACE:           "redis-test-enes"
+  REDIS_NAMESPACES:          "redis-test-enes,redis-sessions"
+  REDIS_POD_LABEL_SELECTOR:  "app=redis"
+  REDIS_SET_LABEL_KEY:       "redis-set"
+  DEFAULT_SET_NAME:          "default"
+  REDIS_PORT:                "6379"
+  REDIS_WRITE_SERVICE_NAME:  "redis-write"
+  RECONCILE_INTERVAL_SECONDS:          "10"
+  MASTER_FAILURE_THRESHOLD_SECONDS:    "15"
+  REDIS_CONNECT_TIMEOUT_SECONDS:       "2"
+  REDIS_COMMAND_TIMEOUT_SECONDS:       "2"
+  PROBE_CONCURRENCY:                   "16"
+  ENABLE_LEADER_ELECTION:              "true"
+  LEASE_NAME:                          "redis-replication-controller"
+  LEASE_NAMESPACE:                     "redis-test-enes"
+  INITIAL_MASTER_STRATEGY:             "lowest-pod-ordinal"
+  ENABLE_CONFIG_REWRITE:               "false"
+  HEALTH_PROBE_ADDR:                   ":8081"
+  LOG_LEVEL:                           "info"

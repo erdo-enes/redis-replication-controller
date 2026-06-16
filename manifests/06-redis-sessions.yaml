@@ -125,82 +125,14 @@ spec:
           # Plain redis-server, NO role decision here (no --replicaof). Every Pod
           # boots as a standalone master; the controller elects one per set.
           command: ["redis-server"]
-          args:
-            - "--protected-mode"
-            - "no"
-            - "--appendonly"
-            - "yes"
-            - "--dir"
-            - "/data"
-            # --- Fast reload ---
-            - "--aof-use-rdb-preamble"
-            - "yes"
-            - "--rdbcompression"
-            - "no"
-            - "--rdbchecksum"
-            - "no"
-            - "--aof-load-truncated"
-            - "yes"
-            - "--loading-process-events-interval-bytes"
-            - "4194304"
-            - "--save"
-            - "900"
-            - "1"
-            - "--save"
-            - "300"
-            - "10"
-            - "--save"
-            - "60"
-            - "10000"
-            # --- I/O ---
-            - "--io-threads"
-            - "4"
-            # --- Memory ---
-            - "--maxmemory"
-            - "6gb"
-            - "--maxmemory-policy"
-            - "allkeys-lru"
-            # --- Background ---
-            - "--hz"
-            - "20"
-            - "--activerehashing"
-            - "yes"
-            - "--lazyfree-lazy-eviction"
-            - "yes"
-            - "--lazyfree-lazy-expire"
-            - "yes"
-            - "--lazyfree-lazy-server-del"
-            - "yes"
-            # --- Replication transport ---
-            - "--repl-diskless-sync"
-            - "yes"
-            - "--repl-diskless-sync-delay"
-            - "5"
-            - "--repl-backlog-size"
-            - "32mb"
-            - "--repl-backlog-ttl"
-            - "3600"
-            - "--repl-timeout"
-            - "60"
-            - "--client-output-buffer-limit"
-            - "replica"
-            - "256mb"
-            - "128mb"
-            - "60"
-            # OPTIONAL consistency knob (off by default). Setting these makes a
-            # master refuse writes once it loses all replicas, which self-fences
-            # a partitioned old master after a failover and shrinks the
-            # split-brain data-loss window. The trade-off is availability: a lone
-            # surviving Pod would also refuse writes, so leave these commented if
-            # "keep serving down to one Pod" matters more than consistency.
-            # - "--min-replicas-to-write"
-            # - "1"
-            # - "--min-replicas-max-lag"
-            # - "10"
+          args: ["/etc/redis/redis.conf"]
           ports:
             - name: redis
               containerPort: 6379
           volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
             - name: redis-data
               mountPath: /data
           readinessProbe:
@@ -220,6 +152,12 @@ spec:
             limits:
               cpu: 4000m
               memory: 8Gi
+
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config-sessions
+
   volumeClaimTemplates:
     - metadata:
         name: redis-data

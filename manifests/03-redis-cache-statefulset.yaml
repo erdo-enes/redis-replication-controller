@@ -113,105 +113,19 @@ spec:
       containers:
         - name: redis
           image: redis:7.4.3-bookworm
-          # Plain redis-server, NO role decision here. protected-mode must be off
-          # so the controller (running in a different Pod) can connect without a
-          # password. AOF persistence is enabled because we use a real PVC below.
+          # NO role decision here — every Pod boots as a standalone master.
+          # The controller elects one master per set via REPLICAOF at runtime.
+          # Config lives in ConfigMap redis-config-cache so it can be updated
+          # without rolling the StatefulSet (just restart the Pods).
           command: ["redis-server"]
-          args:
-            - "--protected-mode"
-            - "no"
-            - "--appendonly"
-            - "yes"
-            - "--dir"
-            - "/data"
-            # --- Fast reload ---
-            # RDB-format preamble so restart loads a snapshot, not replays AOF.
-            - "--aof-use-rdb-preamble"
-            - "yes"
-            # No LZF compression — larger RDB file on disk, but no decompression
-            # overhead on load. On PVC-backed fast storage this is faster overall.
-            - "--rdbcompression"
-            - "no"
-            # Skip CRC64 checksum during RDB load (~10–20 % faster).
-            - "--rdbchecksum"
-            - "no"
-            # Skip validation on truncated AOF (safe on reliable PVC).
-            - "--aof-load-truncated"
-            - "yes"
-            # Process server events only every 4 MB loaded instead of 512 KB,
-            # giving more throughput to the load itself.
-            - "--loading-process-events-interval-bytes"
-            - "4194304"
-            # Periodic RDB snapshots (triggers AOF rewrite which produces the
-            # RDB preamble, keeping the AOF file small and fresh).
-            - "--save"
-            - "900"
-            - "1"
-            - "--save"
-            - "300"
-            - "10"
-            - "--save"
-            - "60"
-            - "10000"
-            # --- I/O ---
-            - "--io-threads"
-            - "4"
-            # --- Memory ---
-            - "--maxmemory"
-            - "6gb"
-            - "--maxmemory-policy"
-            - "allkeys-lru"
-            # --- Background ---
-            - "--hz"
-            - "20"
-            - "--activerehashing"
-            - "yes"
-            - "--lazyfree-lazy-eviction"
-            - "yes"
-            - "--lazyfree-lazy-expire"
-            - "yes"
-            - "--lazyfree-lazy-server-del"
-            - "yes"
-            # --- Replication transport (safe: only affects HOW data moves, not
-            # WHO is master. The controller owns role assignment via REPLICAOF.) ---
-            # Diskless sync: master streams RDB directly to replica sockets
-            # instead of writing to disk first. Faster initial sync.
-            - "--repl-diskless-sync"
-            - "yes"
-            # Wait 5s for additional replicas to join before starting sync.
-            - "--repl-diskless-sync-delay"
-            - "5"
-            # 64 MB replication backlog — allows partial resync after brief
-            # disconnects instead of full RDB transfer. For 10 GB datasets,
-            # a full resync is expensive; the backlog avoids it for short blips.
-            - "--repl-backlog-size"
-            - "64mb"
-            # Keep backlog for 1 hour after last replica disconnects.
-            - "--repl-backlog-ttl"
-            - "3600"
-            # Replication timeout: disconnect replica after 60s of no response.
-            - "--repl-timeout"
-            - "60"
-            # 512 MB output buffer per replica (hard limit). Prevents a slow
-            # replica from being killed mid-sync with a large dataset.
-            - "--client-output-buffer-limit"
-            - "replica"
-            - "512mb"
-            - "256mb"
-            - "60"
-            # OPTIONAL consistency knob (off by default). Makes a master refuse
-            # writes once it loses all replicas, self-fencing a partitioned old
-            # master after failover and shrinking the split-brain data-loss
-            # window. Trade-off: a lone surviving Pod also refuses writes, so
-            # leave commented if "serve down to one Pod" outranks consistency.
-            # - "--min-replicas-to-write"
-            # - "1"
-            # - "--min-replicas-max-lag"
-            # - "10"
+          args: ["/etc/redis/redis.conf"]
           ports:
             - name: redis
               containerPort: 6379
           volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
             - name: redis-data
               mountPath: /data
           readinessProbe:
@@ -231,6 +145,11 @@ spec:
             limits:
               cpu: 4000m
               memory: 8Gi
+
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config-cache
 
   volumeClaimTemplates:
     - metadata:

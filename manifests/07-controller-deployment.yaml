@@ -33,64 +33,16 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          envFrom:
+            - configMapRef:
+                name: controller-config
           env:
-            # Fallback single namespace (used for the Lease and when
-            # REDIS_NAMESPACES is unset).
-            - name: REDIS_NAMESPACE
-              value: "redis-test-enes"
-            # Explicit list of namespaces to manage. The controller needs a Role
-            # granting Pod get/list/watch/patch in EVERY namespace listed here
-            # (see 02-rbac.yaml for "redis-test-enes" and 06-redis-sessions.yaml for
-            # "redis-sessions"). Leave unset to manage only REDIS_NAMESPACE.
-            - name: REDIS_NAMESPACES
-              value: "redis-test-enes,redis-sessions"
-            # Broad selector matching every managed Redis Pod across all sets.
-            - name: REDIS_POD_LABEL_SELECTOR
-              value: "app=redis"
-            # Pods are grouped into independent replication sets by this label's
-            # value; each set gets its own master and its own redis-write-<set>
-            # Service. Pods without the label fold into DEFAULT_SET_NAME.
-            - name: REDIS_SET_LABEL_KEY
-              value: "redis-set"
-            - name: DEFAULT_SET_NAME
-              value: "default"
-            # Max Redis Pods probed in parallel per reconcile, so one set's
-            # unreachable Pods cannot stall failover in the others.
-            - name: PROBE_CONCURRENCY
-              value: "16"
-            - name: REDIS_PORT
-              value: "6379"
-            - name: REDIS_WRITE_SERVICE_NAME
-              value: "redis-write"
-            - name: RECONCILE_INTERVAL_SECONDS
-              value: "10"
-            - name: MASTER_FAILURE_THRESHOLD_SECONDS
-              value: "15"
-            - name: REDIS_CONNECT_TIMEOUT_SECONDS
-              value: "2"
-            - name: REDIS_COMMAND_TIMEOUT_SECONDS
-              value: "2"
-            # Unique identity per replica for leader election.
+            # Unique identity per replica for leader election — must be a
+            # fieldRef because it references the Pod's own name (dynamic).
             - name: CONTROLLER_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ENABLE_LEADER_ELECTION
-              value: "true"
-            - name: LEASE_NAME
-              value: "redis-replication-controller"
-            - name: LEASE_NAMESPACE
-              value: "redis-test-enes"
-            # first-healthy | lowest-pod-ordinal | annotation-preferred
-            - name: INITIAL_MASTER_STRATEGY
-              value: "lowest-pod-ordinal"
-            # Persist replication role via CONFIG REWRITE (see README caveats).
-            - name: ENABLE_CONFIG_REWRITE
-              value: "false"
-            - name: HEALTH_PROBE_ADDR
-              value: ":8081"
-            - name: LOG_LEVEL
-              value: "info"
           ports:
             - name: health
               containerPort: 8081
