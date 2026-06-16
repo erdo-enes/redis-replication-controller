@@ -16,6 +16,8 @@ spec:
         app.kubernetes.io/name: redis-replication-controller
     spec:
       serviceAccountName: redis-replication-controller
+      imagePullSecrets:
+        - name: regcred
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
